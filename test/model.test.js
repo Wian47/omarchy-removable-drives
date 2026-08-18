@@ -357,5 +357,226 @@ test("describes a drive the way a notification should read", () => {
   assert.strictEqual(api.connectedSummary(single[0]), "28.7 GB · 1 volume")
 })
 
+console.log("\nbar label")
+
+const LABEL_DEVICES = api.parse(tree([disk({ children: [part({ mountpoint: "/run/media/x/A", fsavail: 21474836480 })] })]))
+
+test("describes the drive rather than the fleet", () => {
+  assert.strictEqual(api.barLabelText(LABEL_DEVICES, "name"), "USB SanDisk 3.2Gen1")
+  assert.strictEqual(api.barLabelText(LABEL_DEVICES, "free"), "20.0 GB")
+  assert.strictEqual(api.barLabelText(LABEL_DEVICES, "count"), "1")
+  assert.strictEqual(api.barLabelText(LABEL_DEVICES, "none"), "")
+  assert.strictEqual(api.barLabelText([], "name"), "")
+})
+
+test("counts the other drives instead of listing them", () => {
+  const two = api.parse(tree([
+    disk({ children: [part({ mountpoint: "/run/media/x/A", fsavail: 21474836480 })] }),
+    disk({ name: "sdc", path: "/dev/sdc", model: "Kingston DT", children: [part({ name: "sdc1", path: "/dev/sdc1" })] })
+  ]))
+  assert.strictEqual(api.barLabelText(two, "name"), "USB SanDisk 3.2Gen1 +1")
+  assert.strictEqual(api.barLabelText(two, "free"), "20.0 GB +1")
+  assert.strictEqual(api.barLabelText(two, "count"), "2")
+})
+
+test("says nothing when no free figure is knowable", () => {
+  // An unmounted drive, or a full read-only ISO, has no free space to report.
+  const unmounted = api.parse(tree([disk({ children: [part({})] })]))
+  assert.strictEqual(api.barLabelText(unmounted, "free"), "")
+})
+
+console.log("\ntrash")
+
+test("knows both trash layouts in the spec", () => {
+  assert.deepStrictEqual(api.trashCandidates("/run/media/x/STICK", "1000"),
+    ["/run/media/x/STICK/.Trash-1000", "/run/media/x/STICK/.Trash/1000"])
+  assert.deepStrictEqual(api.trashCandidates("", "1000"), [])
+})
+
+test("only accepts a trash path belonging to a live mount point", () => {
+  const mounts = ["/run/media/x/STICK"]
+  assert.strictEqual(api.isSafeTrashPath("/run/media/x/STICK/.Trash-1000", mounts, "1000"), true)
+  assert.strictEqual(api.isSafeTrashPath("/run/media/x/STICK/.Trash/1000", mounts, "1000"), true)
+})
+
+test("refuses anything that is not exactly a candidate", () => {
+  // The guard in front of `rm -rf`: no prefix matching, no globbing, no
+  // traversal, and nothing belonging to a mount we are not tracking.
+  const mounts = ["/run/media/x/STICK"]
+  for (const evil of [
+    "/",
+    "/home/wian47",
+    "/run/media/x/STICK",
+    "/run/media/x/STICK/",
+    "/run/media/x/STICK/.Trash-1000/..",
+    "/run/media/x/STICK/.Trash-1000/../../..",
+    "/run/media/x/OTHER/.Trash-1000",
+    "/run/media/x/STICK/.Trash-999",
+    "/run/media/x/STICK/Documents",
+    ""
+  ]) {
+    assert.strictEqual(api.isSafeTrashPath(evil, mounts, "1000"), false, evil + " must be refused")
+  }
+  assert.strictEqual(api.isSafeTrashPath("/run/media/x/STICK/.Trash-1000", [], "1000"), false,
+    "no mounts means nothing is safe")
+})
+
+test("reads du output and ignores its complaints", () => {
+  const raw = "4096\t/run/media/x/STICK/.Trash-1000\n12\t/run/media/x/OTHER/.Trash-1000\n"
+  assert.deepStrictEqual(api.parseSizes(raw), {
+    "/run/media/x/STICK/.Trash-1000": 4096,
+    "/run/media/x/OTHER/.Trash-1000": 12
+  })
+  assert.deepStrictEqual(api.parseSizes("du: cannot access ...: No such file or directory"), {})
+  assert.deepStrictEqual(api.parseSizes(""), {})
+})
+
+console.log("\nper-drive memory")
+
+test("keys a drive by something that survives replugging", () => {
+  const withSerial = api.parse(tree([disk({ serial: "ABC123", children: [part({})] })]))[0]
+  assert.strictEqual(api.driveKey(withSerial), "serial:ABC123")
+
+  const noSerial = api.parse(tree([disk({ serial: null, children: [part({ uuid: "DEAD-BEEF" })] })]))[0]
+  assert.strictEqual(api.driveKey(noSerial), "uuid:DEAD-BEEF")
+
+  const neither = api.parse(tree([disk({ serial: null, children: [part({ uuid: null })] })]))[0]
+  assert.ok(api.driveKey(neither).startsWith("model:"))
+})
+
+test("a nickname replaces the title but never loses the real name", () => {
+  const devices = api.parse(tree([disk({ serial: "ABC123", children: [part({})] })]))
+  const store = { version: 1, drives: { "serial:ABC123": { nickname: "Work backup" } } }
+  api.applyStore(devices, store)
+  assert.strictEqual(devices[0].title, "Work backup")
+  assert.strictEqual(devices[0].nickname, "Work backup")
+  assert.strictEqual(devices[0].deviceName, "USB SanDisk 3.2Gen1")
+})
+
+test("an unknown drive keeps its hardware name", () => {
+  const devices = api.parse(tree([disk({ serial: "OTHER", children: [part({})] })]))
+  api.applyStore(devices, { version: 1, drives: { "serial:ABC123": { nickname: "Work backup" } } })
+  assert.strictEqual(devices[0].title, "USB SanDisk 3.2Gen1")
+  assert.strictEqual(devices[0].nickname, "")
+})
+
+test("saving a setting leaves every other drive alone", () => {
+  const device = api.parse(tree([disk({ serial: "ABC123", children: [part({})] })]))[0]
+  const before = { version: 1, drives: { "serial:OTHER": { nickname: "Photos" } } }
+  const after = api.withDriveSetting(before, device, "nickname", "Work backup")
+  assert.strictEqual(after.drives["serial:OTHER"].nickname, "Photos")
+  assert.strictEqual(after.drives["serial:ABC123"].nickname, "Work backup")
+  assert.strictEqual(before.drives["serial:ABC123"], undefined, "the original store is not mutated")
+})
+
+test("clearing a nickname removes the entry rather than storing an empty one", () => {
+  const device = api.parse(tree([disk({ serial: "ABC123", children: [part({})] })]))[0]
+  const stored = api.withDriveSetting({ version: 1, drives: {} }, device, "nickname", "Work backup")
+  const cleared = api.withDriveSetting(stored, device, "nickname", "")
+  assert.deepStrictEqual(cleared.drives, {})
+})
+
+test("keeps a drive's other settings when one of them changes", () => {
+  const device = api.parse(tree([disk({ serial: "ABC123", children: [part({})] })]))[0]
+  let store = api.withDriveSetting({ version: 1, drives: {} }, device, "onConnect", "rsync -a /src /dst")
+  store = api.withDriveSetting(store, device, "nickname", "Backup")
+  assert.strictEqual(store.drives["serial:ABC123"].onConnect, "rsync -a /src /dst")
+  assert.strictEqual(store.drives["serial:ABC123"].nickname, "Backup")
+})
+
+test("a corrupt or missing state file reads as empty, not as a crash", () => {
+  assert.deepStrictEqual(api.parseStore("").drives, {})
+  assert.deepStrictEqual(api.parseStore("{ not json").drives, {})
+  assert.deepStrictEqual(api.parseStore("null").drives, {})
+  assert.deepStrictEqual(api.parseStore('{"drives":{"serial:A":{"nickname":"X"}}}').drives, { "serial:A": { nickname: "X" } })
+})
+
+console.log("\nphones and cameras")
+
+// Shape of `gio mount -li` with a phone attached: gvfs reports the same
+// device as a Drive and a Volume, and adds a Mount line once it is mounted.
+const GIO_PHONE = `Drive(0): WD PC SN5000S
+  Type: GProxyDrive (GProxyVolumeMonitorUDisks2)
+  is_removable=0
+  Volume(0): 755 GB Volume
+    Type: GProxyVolume (GProxyVolumeMonitorUDisks2)
+    uuid=3E30553F3054FF79
+Drive(1): Pixel 7
+  Type: GProxyDrive (GProxyVolumeMonitorMTP)
+  Volume(0): Pixel 7
+    Type: GProxyVolume (GProxyVolumeMonitorMTP)
+    activation_root=mtp://Google_Pixel_7_1A2B3C/
+    Mount(0): Pixel 7 -> mtp://Google_Pixel_7_1A2B3C/
+      Type: GProxyShadowMount (GProxyVolumeMonitorMTP)`
+
+test("finds a phone and ignores the internal disk", () => {
+  const found = api.parseGioMounts(GIO_PHONE)
+  assert.strictEqual(found.length, 1)
+  assert.strictEqual(found[0].name, "Pixel 7")
+  assert.strictEqual(found[0].uri, "mtp://Google_Pixel_7_1A2B3C/")
+  assert.strictEqual(found[0].mounted, true)
+  assert.strictEqual(found[0].kind, "phone")
+})
+
+test("reports an attached but unmounted phone", () => {
+  const withoutMount = GIO_PHONE.split("\n").filter(l => !/Mount\(0\)|GProxyShadowMount/.test(l)).join("\n")
+  const found = api.parseGioMounts(withoutMount)
+  assert.strictEqual(found.length, 1)
+  assert.strictEqual(found[0].mounted, false)
+  assert.strictEqual(found[0].uri, "mtp://Google_Pixel_7_1A2B3C/")
+})
+
+test("recognises a camera as a camera", () => {
+  const camera = `Drive(0): Canon EOS
+  Type: GProxyDrive (GProxyVolumeMonitorGPhoto2)
+  Volume(0): Canon EOS
+    Type: GProxyVolume (GProxyVolumeMonitorGPhoto2)
+    activation_root=gphoto2://usb%3A001%2C012/`
+  const found = api.parseGioMounts(camera)
+  assert.strictEqual(found.length, 1)
+  assert.strictEqual(found[0].kind, "camera")
+  assert.strictEqual(api.portableGlyph(found[0]), api.GLYPH_CAMERA)
+  assert.strictEqual(api.portableGlyph({ kind: "phone" }), api.GLYPH_PHONE)
+})
+
+test("collapses the drive and volume gvfs reports for one phone", () => {
+  const found = api.parseGioMounts(GIO_PHONE)
+  assert.strictEqual(found.filter(e => e.uri === "mtp://Google_Pixel_7_1A2B3C/").length, 1)
+})
+
+test("catches a device by its URI even if the type line is unfamiliar", () => {
+  // gvfs backend names have changed before; the mtp:// URI is the sturdier
+  // signal, so either one alone is enough.
+  const odd = `Volume(0): Some Phone
+    Type: GProxyVolume (SomeFutureBackend)
+    activation_root=mtp://Some_Phone_9/`
+  const found = api.parseGioMounts(odd)
+  assert.strictEqual(found.length, 1)
+  assert.strictEqual(found[0].name, "Some Phone")
+})
+
+test("finds nothing in a listing that has no portable device", () => {
+  const onlyDisks = GIO_PHONE.split("Drive(1)")[0]
+  assert.deepStrictEqual(api.parseGioMounts(onlyDisks), [])
+  assert.deepStrictEqual(api.parseGioMounts(""), [])
+  assert.deepStrictEqual(api.parseGioMounts("nonsense"), [])
+})
+
+test("describes a phone's state for the row", () => {
+  assert.strictEqual(api.portableMeta({ kind: "phone", mounted: true }), "Phone · mounted")
+  assert.strictEqual(api.portableMeta({ kind: "camera", mounted: true }), "Camera · mounted")
+  assert.strictEqual(api.portableMeta({ kind: "phone", mounted: false }), "Not mounted")
+  assert.strictEqual(api.portableMeta(null), "")
+})
+
+test("gives phones their own navigation rows after the drives", () => {
+  const devices = api.parse(tree([disk({ children: [part({})] })]))
+  const rows = api.navRows(devices, [{ name: "Pixel 7" }])
+  assert.deepStrictEqual(rows.map(r => r.kind), ["device", "volume", "portable"])
+  assert.strictEqual(rows[2].portable, 0)
+  assert.deepStrictEqual(api.navRows(devices).map(r => r.kind), ["device", "volume"])
+  assert.deepStrictEqual(api.navRows([], [{ name: "Pixel 7" }]).map(r => r.kind), ["portable"])
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

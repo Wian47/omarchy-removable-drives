@@ -46,6 +46,17 @@ Item {
   property var blockers: []
   property string blockedFsPath: ""
 
+  // Phones and cameras, which are not block devices at all — gvfs mounts
+  // them over MTP and lsblk never sees them.
+  property var portables: []
+
+  // Per-drive settings the user has saved, keyed so they survive replugging.
+  property var store: ({ version: 1, drives: {} })
+
+  // Bytes sitting in each mounted volume's trash, keyed by trash directory.
+  property var trashSizes: ({})
+  property string uid: ""
+
   readonly property bool busy: actionProcess.running
   readonly property int deviceCount: devices.length
   readonly property int mountedCount: {
@@ -143,6 +154,7 @@ Item {
       return
     }
 
+    Model.applyStore(next, store)
     var diff = Model.deviceDiff(_previousDevices, next)
     devices = next
     _previousDevices = next
@@ -154,6 +166,8 @@ Item {
     // every login.
     if (_seenFirstSnapshot) announceChanges(diff)
     _seenFirstSnapshot = true
+
+    if (watchClosely) probeTrash()
 
     // A mount requested with "open after mounting" only knows where the
     // filesystem landed once the next snapshot comes back with a mount point.
@@ -182,6 +196,7 @@ Item {
     for (i = 0; i < diff.added.length; i++) {
       var added = diff.added[i]
       notify(added.title + " connected", Model.connectedSummary(added), added.glyph)
+      runConnectHook(added)
     }
     for (i = 0; i < diff.removed.length; i++) {
       var gone = diff.removed[i]
@@ -387,6 +402,147 @@ Item {
                              "cd " + quote(volume.mountpoint) + " && exec $SHELL"])
   }
 
+  // -------------------------------------------------- per-drive memory
+
+  readonly property string storePath: Quickshell.env("HOME") + "/.local/state/omarchy/removable-drives.json"
+
+  function saveDriveSetting(device, name, value) {
+    if (!device) return
+    var next = Model.withDriveSetting(store, device, name, value)
+    store = next
+    storeWriter.command = ["bash", "-c",
+                           'mkdir -p "$(dirname "$2")" && printf %s "$1" > "$2"',
+                           "removable-drives", JSON.stringify(next), storePath]
+    storeWriter.running = true
+    // Re-apply immediately so the panel renames without waiting for lsblk.
+    var applied = devices.slice()
+    Model.applyStore(applied, next)
+    devices = applied
+  }
+
+  function setNickname(device, nickname) {
+    saveDriveSetting(device, "nickname", String(nickname || "").replace(/^\s+|\s+$/g, ""))
+  }
+
+  function driveSetting(device, name, fallback) {
+    var saved = Model.driveSettings(store, device)
+    var value = saved[name]
+    return value === undefined || value === null ? fallback : value
+  }
+
+  // A user-authored command run when a specific drive appears — a backup, a
+  // sync, an import. It is never inferred and never suggested; it only runs
+  // if someone put it in the state file for that drive themselves.
+  function runConnectHook(device) {
+    var command = String(driveSetting(device, "onConnect", "")).replace(/^\s+|\s+$/g, "")
+    if (command === "") return
+    Quickshell.execDetached(["bash", "-c", command, "removable-drives", device.path, mountpointOf(device)])
+  }
+
+  function mountpointOf(device) {
+    if (!device) return ""
+    for (var i = 0; i < device.volumes.length; i++) {
+      if (device.volumes[i].mounted) return device.volumes[i].mountpoint
+    }
+    return ""
+  }
+
+  // -------------------------------------------------------------- trash
+
+  function mountedMountpoints() {
+    var out = []
+    for (var d = 0; d < devices.length; d++) {
+      for (var v = 0; v < devices[d].volumes.length; v++) {
+        if (devices[d].volumes[v].mounted) out.push(devices[d].volumes[v].mountpoint)
+      }
+    }
+    return out
+  }
+
+  function probeTrash() {
+    if (trashProcess.running || uid === "") return
+    var mounts = mountedMountpoints()
+    if (mounts.length === 0) {
+      trashSizes = ({})
+      return
+    }
+    var command = ["du", "-sb", "--"]
+    for (var i = 0; i < mounts.length; i++) {
+      var candidates = Model.trashCandidates(mounts[i], uid)
+      for (var c = 0; c < candidates.length; c++) command.push(candidates[c])
+    }
+    trashProcess.command = command
+    trashProcess.running = true
+  }
+
+  function trashSizeFor(volume) {
+    if (!volume || !volume.mounted) return 0
+    var candidates = Model.trashCandidates(volume.mountpoint, uid)
+    for (var i = 0; i < candidates.length; i++) {
+      var size = trashSizes[candidates[i]]
+      if (size > 0) return size
+    }
+    return 0
+  }
+
+  function trashPathFor(volume) {
+    if (!volume || !volume.mounted) return ""
+    var candidates = Model.trashCandidates(volume.mountpoint, uid)
+    for (var i = 0; i < candidates.length; i++) {
+      if (trashSizes[candidates[i]] > 0) return candidates[i]
+    }
+    return ""
+  }
+
+  // Recursive deletion, so the path is re-derived from the live mount list
+  // and matched exactly rather than trusted from the caller.
+  function emptyTrash(volume) {
+    var path = trashPathFor(volume)
+    if (path === "" || busy) return
+    if (!Model.isSafeTrashPath(path, mountedMountpoints(), uid)) {
+      lastError = "Refusing to empty an unrecognised trash path"
+      return
+    }
+    runAction(["rm", "-rf", "--", path], volume.fsPath, "trash",
+              "Emptied trash on " + volume.title)
+  }
+
+  // ------------------------------------------------ phones and cameras
+
+  function refreshPortables() {
+    if (gioProcess.running) return
+    gioProcess.running = true
+  }
+
+  function mountPortable(entry) {
+    if (!entry || entry.uri === "" || busy) return
+    runAction(["gio", "mount", entry.uri], entry.uri, "mount-portable", "Mounted " + entry.name)
+  }
+
+  function unmountPortable(entry) {
+    if (!entry || entry.uri === "" || busy) return
+    runAction(["gio", "mount", "-u", entry.uri], entry.uri, "unmount-portable", "Unmounted " + entry.name)
+  }
+
+  function togglePortable(entry) {
+    if (!entry) return
+    if (entry.mounted) unmountPortable(entry)
+    else mountPortable(entry)
+  }
+
+  function openPortable(entry) {
+    if (!entry || entry.uri === "") return
+    Quickshell.execDetached(["uwsm-app", "--", "xdg-open", entry.uri])
+  }
+
+  // ------------------------------------------------------ small actions
+
+  function copyPath(volume) {
+    if (!volume || !volume.mounted) return
+    Quickshell.execDetached(["bash", "-c", 'printf %s "$1" | wl-copy', "removable-drives", volume.mountpoint])
+    actionStatus = "Copied " + volume.mountpoint
+  }
+
   function notify(headline, description, glyph, urgency) {
     if (!notificationsEnabled) return
     var command = ["omarchy-notification-send", "-g", glyph]
@@ -434,7 +590,7 @@ Item {
   Process {
     id: lsblkProcess
     command: ["lsblk", "-J", "-b", "-o",
-              "NAME,PATH,LABEL,PARTLABEL,FSTYPE,SIZE,FSSIZE,FSAVAIL,FSUSED,MOUNTPOINT,RM,HOTPLUG,TYPE,TRAN,VENDOR,MODEL"]
+              "NAME,PATH,LABEL,PARTLABEL,FSTYPE,SIZE,FSSIZE,FSAVAIL,FSUSED,MOUNTPOINT,RM,HOTPLUG,TYPE,TRAN,VENDOR,MODEL,UUID,SERIAL"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applySnapshot(text)
@@ -493,13 +649,58 @@ Item {
     }
   }
 
+  Process {
+    id: gioProcess
+    command: ["gio", "mount", "-li"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.portables = Model.parseGioMounts(text)
+    }
+  }
+
+  Process {
+    id: trashProcess
+    // Most candidates do not exist; du complains about those on stderr and
+    // still reports the ones that do, so a non-zero exit is expected here.
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.trashSizes = Model.parseSizes(text)
+    }
+  }
+
+  Process {
+    id: storeWriter
+  }
+
+  Process {
+    id: uidProcess
+    command: ["id", "-u"]
+    running: true
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.uid = String(text).replace(/\s+/g, "")
+    }
+  }
+
+  // The saved nicknames and hooks. Watched rather than read once, so editing
+  // the file by hand takes effect without restarting the shell.
+  FileView {
+    id: storeFile
+    path: root.storePath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.store = Model.parseStore(text())
+    onFileChanged: reload()
+    onLoadFailed: root.store = ({ version: 1, drives: {} })
+  }
+
   // udev tells us the moment a device appears or disappears, which is the
   // difference between a widget that reacts and one that polls. stdbuf keeps
   // udevadm line-buffered — piped, it would otherwise sit on a 4KB buffer and
   // deliver the first event minutes late.
   Process {
     id: monitorProcess
-    command: ["stdbuf", "-oL", "udevadm", "monitor", "--udev", "--subsystem-match=block"]
+    command: ["stdbuf", "-oL", "udevadm", "monitor", "--udev", "--subsystem-match=block", "--subsystem-match=usb"]
     running: true
     stdout: SplitParser {
       onRead: function(line) {
@@ -514,7 +715,10 @@ Item {
   Timer {
     id: debounce
     interval: 350
-    onTriggered: root.refresh()
+    onTriggered: {
+      root.refresh()
+      root.refreshPortables()
+    }
   }
 
   Timer {
@@ -551,5 +755,13 @@ Item {
     onTriggered: root.refresh()
   }
 
-  Component.onCompleted: refresh()
+  onWatchCloselyChanged: if (watchClosely) {
+    refreshPortables()
+    probeTrash()
+  }
+
+  Component.onCompleted: {
+    refresh()
+    refreshPortables()
+  }
 }

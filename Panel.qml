@@ -27,8 +27,24 @@ Panel {
   readonly property bool alwaysShow: setting("alwaysShow", false) === true
   readonly property bool openOnMount: setting("openOnMount", true) === true
 
+  // "none" | "free" | "name" | "count". A vertical bar is 28px wide, so a
+  // label has nowhere to go there and the icon stands alone regardless.
+  // Ui.Panel is not Ui.BarWidget, so bar geometry is read off the host.
+  readonly property bool vertical: bar ? bar.vertical : false
+  readonly property int barSize: bar ? bar.barSize : Style.bar.sizeHorizontal
+  readonly property string labelMode: vertical ? "none" : String(setting("barLabel", "none"))
+  readonly property string barLabel: Model.barLabelText(devices, labelMode)
+  readonly property string barTooltip: drives.anyBusy
+    ? (Model.formatRate(drives.totalWriteRate) !== ""
+        ? "Writing " + Model.formatRate(drives.totalWriteRate) + " — do not remove"
+        : "Busy — do not remove")
+    : Model.summary(devices)
+
+  // Key of the drive whose name is being edited inline, "" when none is.
+  property string renamingKey: ""
+
   readonly property var devices: drives.devices
-  readonly property var rows: Model.navRows(drives.devices)
+  readonly property var rows: Model.navRows(drives.devices, drives.portables)
   property int cursor: 0
   property bool cursorActive: false
   property Item cursorItem: null
@@ -40,6 +56,11 @@ Panel {
   function currentDevice() {
     if (!currentRow) return null
     return devices[currentRow.device] || null
+  }
+
+  function currentPortable() {
+    if (!currentRow || currentRow.kind !== "portable") return null
+    return drives.portables[currentRow.portable] || null
   }
 
   function currentVolume() {
@@ -88,7 +109,37 @@ Panel {
   function activateCursor() {
     if (!currentRow) return
     if (currentRow.kind === "device") drives.eject(currentDevice())
+    else if (currentRow.kind === "portable") activatePortable(currentPortable())
     else activateVolume(currentVolume())
+  }
+
+  function activatePortable(entry) {
+    if (!entry) return
+    if (entry.mounted) drives.openPortable(entry)
+    else drives.mountPortable(entry)
+  }
+
+  function rowIndexOfPortable(portableIndex) {
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].kind === "portable" && rows[i].portable === portableIndex) return i
+    }
+    return 0
+  }
+
+  function handleBarPress(buttonCode) {
+    if (buttonCode === Qt.RightButton) {
+      drives.refresh()
+    } else if (buttonCode === Qt.MiddleButton) {
+      var mounted = Model.mountedVolumes(devices)
+      if (mounted.length > 0) drives.openVolume(mounted[0])
+    } else {
+      toggle()
+    }
+  }
+
+  function beginRename(device) {
+    if (!device) return
+    renamingKey = device.key
   }
 
   // One click does the obvious thing: an unmounted volume mounts (and opens,
@@ -126,9 +177,9 @@ Panel {
     Qt.callLater(function() { scrollItemIntoView(root.cursorItem) })
   }
 
-  visible: devices.length > 0 || alwaysShow
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
+  visible: devices.length > 0 || drives.portables.length > 0 || alwaysShow
+  implicitWidth: button.item ? button.item.implicitWidth : 0
+  implicitHeight: button.item ? button.item.implicitHeight : barSize
 
   onVisibleChanged: if (!visible && opened) close()
   onRowsChanged: clampCursor()
@@ -172,6 +223,19 @@ Panel {
       return "unknown device: " + path
     }
 
+    // Nickname a drive from a script or keybind. An empty name clears it.
+    function rename(path: string, nickname: string): string {
+      for (var i = 0; i < drives.devices.length; i++) {
+        if (drives.devices[i].path === path) {
+          drives.setNickname(drives.devices[i], nickname)
+          return "ok"
+        }
+      }
+      return "unknown device: " + path
+    }
+
+    function phones(): string { return JSON.stringify(drives.portables) }
+
     function ejectAll(): string {
       if (drives.devices.length === 0) return "no drives attached"
       drives.ejectAll()
@@ -191,28 +255,41 @@ Panel {
     }
   }
 
-  BarIconButton {
+  // Icon-only is the default and uses BarIconButton, whose optical centring
+  // lines the glyph up with the rest of the bar. A label needs a text slot
+  // that grows with its content, which is WidgetButton's job — so the two
+  // modes are two components rather than one widget bent into both shapes.
+  Loader {
     id: button
     anchors.fill: parent
-    bar: root.bar
-    text: Model.barGlyph(root.devices)
-    // The icon turns urgent while the kernel still has I/O in flight. That is
-    // the whole warning: if it is lit, the drive is not safe to pull yet.
-    tooltipText: drives.anyBusy
-      ? (Model.formatRate(drives.totalWriteRate) !== ""
-          ? "Writing " + Model.formatRate(drives.totalWriteRate) + " — do not remove"
-          : "Busy — do not remove")
-      : Model.summary(root.devices)
-    active: drives.anyBusy
-    onPressed: function(buttonCode) {
-      if (buttonCode === Qt.RightButton) {
-        drives.refresh()
-      } else if (buttonCode === Qt.MiddleButton) {
-        var mounted = Model.mountedVolumes(root.devices)
-        if (mounted.length > 0) drives.openVolume(mounted[0])
-      } else {
-        root.toggle()
-      }
+    sourceComponent: root.labelMode !== "none" && root.barLabel !== "" ? labelledButton : iconButton
+  }
+
+  Component {
+    id: iconButton
+
+    BarIconButton {
+      anchors.fill: parent
+      bar: root.bar
+      text: Model.barGlyph(root.devices)
+      // The icon turns urgent while the kernel still has I/O in flight. That
+      // is the whole warning: if it is lit, the drive is not safe to pull yet.
+      tooltipText: root.barTooltip
+      active: drives.anyBusy
+      onPressed: function(buttonCode) { root.handleBarPress(buttonCode) }
+    }
+  }
+
+  Component {
+    id: labelledButton
+
+    WidgetButton {
+      anchors.fill: parent
+      bar: root.bar
+      text: Model.barGlyph(root.devices) + "  " + root.barLabel
+      tooltipText: root.barTooltip
+      active: drives.anyBusy
+      onPressed: function(buttonCode) { root.handleBarPress(buttonCode) }
     }
   }
 
@@ -229,6 +306,9 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // While a nickname is being typed, every keystroke belongs to the
+      // text field rather than to the cursor.
+      blocked: root.renamingKey !== ""
 
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) {
@@ -247,7 +327,12 @@ Panel {
         else if (text === "E") drives.ejectAll()
         else if (text === "o" || text === "O") drives.openVolume(root.currentVolume())
         else if (text === "t" || text === "T") drives.openTerminal(root.currentVolume())
-        else if (text === "m" || text === "M") drives.toggleMount(root.currentVolume(), root.openOnMount)
+        else if (text === "y" || text === "Y") drives.copyPath(root.currentVolume())
+        else if (text === "n" || text === "N") root.beginRename(root.currentDevice())
+        else if (text === "m" || text === "M") {
+          if (root.currentRow && root.currentRow.kind === "portable") drives.togglePortable(root.currentPortable())
+          else drives.toggleMount(root.currentVolume(), root.openOnMount)
+        }
       }
 
       Flickable {
@@ -419,6 +504,36 @@ Panel {
               }
             }
           }
+
+          // Phones and cameras speak MTP rather than being block devices, so
+          // they get their own section instead of being pushed into a list
+          // that talks about partitions and free space.
+          Column {
+            visible: drives.portables.length > 0
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSeparator { foreground: root.foreground }
+
+            PanelSectionHeader {
+              text: "PHONES & CAMERAS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: drives.portables
+
+              PortableRow {
+                required property var modelData
+                required property int index
+
+                width: parent.width
+                entry: modelData
+                portableIndex: index
+              }
+            }
+          }
         }
       }
     }
@@ -435,6 +550,7 @@ Panel {
     readonly property bool selected: root.cursorActive && root.currentRow
       && root.currentRow.kind === "device" && root.currentRow.device === deviceIndex
     readonly property string activity: device ? drives.activityLabelFor(device) : ""
+    readonly property bool renaming: device && device.key !== "" && root.renamingKey === device.key
     readonly property bool ejectPending: device
       && (drives.pendingEjectPath === device.path || drives.pendingEjectPath === "*")
 
@@ -443,6 +559,18 @@ Panel {
     implicitHeight: deviceContent.implicitHeight + Style.spacing.rowPaddingX
 
     onSelectedChanged: if (selected) root.cursorItem = deviceRow
+
+    function commitRename(value) {
+      drives.setNickname(device, value)
+      endRename()
+    }
+
+    function cancelRename() { endRename() }
+
+    function endRename() {
+      root.renamingKey = ""
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    }
 
     MouseArea {
       anchors.fill: parent
@@ -473,6 +601,7 @@ Panel {
         spacing: Style.space(1)
 
         Text {
+          visible: !deviceRow.renaming
           Layout.fillWidth: true
           text: deviceRow.device ? deviceRow.device.title : ""
           color: root.foreground
@@ -480,6 +609,26 @@ Panel {
           font.pixelSize: Style.font.body
           font.bold: true
           elide: Text.ElideRight
+        }
+
+        // Inline rename. Enter saves, Escape leaves the drive as it was, and
+        // an empty name clears the nickname rather than storing a blank one.
+        TextField {
+          id: nameField
+          visible: deviceRow.renaming
+          Layout.fillWidth: true
+          foreground: root.foreground
+          verticalPadding: Style.space(2)
+          placeholderText: deviceRow.device ? deviceRow.device.deviceName : ""
+          onVisibleChanged: if (visible) {
+            text = deviceRow.device && deviceRow.device.nickname !== "" ? deviceRow.device.nickname : ""
+            Qt.callLater(function() { nameField.forceActiveFocus(); nameField.selectAll() })
+          }
+          // The handlers call back into the row rather than reaching for the
+          // panel directly: `root` does not resolve inside a qs.Ui TextField,
+          // whose own definition already binds that name.
+          onAccepted: deviceRow.commitRename(text)
+          Keys.onEscapePressed: deviceRow.cancelRename()
         }
 
         Text {
@@ -495,6 +644,16 @@ Panel {
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
         }
+      }
+
+      PanelActionButton {
+        iconText: Model.GLYPH_PENCIL
+        tooltipText: "Rename this drive"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfDevice(deviceRow.deviceIndex)) }
+        onClicked: root.beginRename(deviceRow.device)
       }
 
       PanelActionButton {
@@ -516,6 +675,93 @@ Panel {
     }
   }
 
+  component PortableRow: CursorSurface {
+    id: portableRow
+
+    property var entry: null
+    property int portableIndex: 0
+
+    readonly property bool selected: root.cursorActive && root.currentRow
+      && root.currentRow.kind === "portable" && root.currentRow.portable === portableIndex
+
+    hasCursor: selected
+    foreground: root.foreground
+    implicitHeight: portableContent.implicitHeight + Style.spacing.rowPaddingX
+
+    onSelectedChanged: if (selected) root.cursorItem = portableRow
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onEntered: root.setCursor(root.rowIndexOfPortable(portableRow.portableIndex))
+      onClicked: root.activatePortable(portableRow.entry)
+    }
+
+    RowLayout {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(8)
+
+      Text {
+        text: Model.portableGlyph(portableRow.entry)
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.icon
+        Layout.alignment: Qt.AlignVCenter
+      }
+
+      ColumnLayout {
+        id: portableContent
+        Layout.fillWidth: true
+        spacing: Style.space(1)
+
+        Text {
+          Layout.fillWidth: true
+          text: portableRow.entry ? portableRow.entry.name : ""
+          color: portableRow.entry && portableRow.entry.mounted ? root.foreground : Qt.darker(root.foreground, 1.25)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+        }
+
+        Text {
+          Layout.fillWidth: true
+          text: Model.portableMeta(portableRow.entry)
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+
+      PanelActionButton {
+        visible: portableRow.entry && portableRow.entry.mounted
+        iconText: Model.GLYPH_FOLDER
+        tooltipText: "Browse this device"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfPortable(portableRow.portableIndex)) }
+        onClicked: drives.openPortable(portableRow.entry)
+      }
+
+      PanelActionButton {
+        iconText: portableRow.entry && portableRow.entry.mounted ? Model.GLYPH_UNMOUNT : Model.GLYPH_MOUNT
+        tooltipText: portableRow.entry && portableRow.entry.mounted ? "Unmount" : "Mount"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        enabled: !drives.busy
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfPortable(portableRow.portableIndex)) }
+        onClicked: drives.togglePortable(portableRow.entry)
+      }
+    }
+  }
+
   component VolumeRow: CursorSurface {
     id: volumeRow
 
@@ -530,6 +776,7 @@ Panel {
     readonly property bool actionable: volume
       && (volume.mounted || Model.isMountable(volume) || (volume.encrypted && !volume.unlocked))
     readonly property bool working: volume && drives.busyPath === volume.fsPath
+    readonly property real trashBytes: volume ? drives.trashSizeFor(volume) : 0
 
     hasCursor: selected
     foreground: root.foreground
@@ -607,6 +854,44 @@ Panel {
             Behavior on width {
               NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
             }
+          }
+        }
+
+        // Deleted files on removable media go to a .Trash-<uid> on the drive
+        // itself, where nothing surfaces them — so a stick reads as full of
+        // files its owner believes are gone.
+        RowLayout {
+          visible: volumeRow.trashBytes > 0
+          Layout.fillWidth: true
+          Layout.topMargin: Style.space(2)
+          spacing: Style.space(6)
+
+          Text {
+            text: Model.GLYPH_TRASH
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            Layout.fillWidth: true
+            text: Model.formatBytes(volumeRow.trashBytes) + " in trash on this drive"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+
+          PanelActionButton {
+            iconText: Model.GLYPH_TRASH
+            tooltipText: "Empty this drive's trash"
+            foreground: root.foreground
+            hoverColor: root.urgent
+            fontFamily: root.fontFamily
+            fontSize: Style.font.bodySmall
+            size: Style.space(18)
+            enabled: !drives.busy
+            onClicked: drives.emptyTrash(volumeRow.volume)
           }
         }
       }

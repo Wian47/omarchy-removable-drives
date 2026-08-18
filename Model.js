@@ -29,6 +29,12 @@ var GLYPH_LOCKED = codepoint(0xF033E)   // md-lock
 var GLYPH_UNLOCKED = codepoint(0xF033F) // md-lock_open
 var GLYPH_ALERT = codepoint(0xF0028)    // md-alert_circle
 var GLYPH_REFRESH = codepoint(0xF0450)  // md-refresh
+var GLYPH_PHONE = codepoint(0xF011C)     // md-cellphone
+var GLYPH_CAMERA = codepoint(0xF0100)    // md-camera
+var GLYPH_TRASH = codepoint(0xF0A7A)     // md-trash_can_outline
+var GLYPH_PENCIL = codepoint(0xF03EB)    // md-pencil
+var GLYPH_TERMINAL = codepoint(0xF018D)  // md-console
+var GLYPH_COPY = codepoint(0xF018F)      // md-content_copy
 
 // ------------------------------------------------------------ formatting
 
@@ -145,6 +151,7 @@ function buildVolume(part, index) {
     path: clean(part.path),
     fsPath: clean(fsNode.path),
     name: clean(part.name),
+    uuid: clean(fsNode.uuid) || clean(part.uuid),
     index: index,
     label: label,
     title: label !== "" ? label : clean(part.name),
@@ -192,7 +199,10 @@ function buildDevice(node) {
   return {
     path: clean(node.path),
     name: clean(node.name),
+    serial: clean(node.serial),
     title: deviceTitle(node),
+    nickname: "",
+    key: "",
     glyph: deviceGlyph(node),
     tran: clean(node.tran),
     sizeBytes: Number(node.size || 0),
@@ -270,13 +280,16 @@ function mountedVolumes(devices) {
 // Flat list the panel walks with j/k. Device headers are cursor targets too,
 // because ejecting is the one action that belongs to the whole device rather
 // than to any single partition on it.
-function navRows(devices) {
+function navRows(devices, portables) {
   var rows = []
-  for (var d = 0; d < devices.length; d++) {
+  for (var d = 0; d < (devices || []).length; d++) {
     rows.push({ kind: "device", device: d, volume: -1 })
     for (var v = 0; v < devices[d].volumes.length; v++) {
       rows.push({ kind: "volume", device: d, volume: v })
     }
+  }
+  for (var p = 0; p < (portables || []).length; p++) {
+    rows.push({ kind: "portable", device: -1, volume: -1, portable: p })
   }
   return rows
 }
@@ -440,4 +453,242 @@ function advanceQuiet(stillBusy, quietTicks, requiredTicks) {
   if (stillBusy) return { quietTicks: 0, run: false }
   var next = Number(quietTicks || 0) + 1
   return { quietTicks: next, run: next >= requiredTicks }
+}
+
+// -------------------------------------------------------------- bar label
+
+// Optional text beside the bar icon. One drive is the common case, so the
+// label describes that one and only counts the rest.
+function barLabelText(devices, mode) {
+  if (!devices || devices.length === 0) return ""
+  if (mode === "count") return String(devices.length)
+
+  var extra = devices.length > 1 ? " +" + (devices.length - 1) : ""
+  if (mode === "name") return devices[0].title + extra
+  if (mode === "free") {
+    for (var d = 0; d < devices.length; d++) {
+      var volumes = devices[d].volumes
+      for (var v = 0; v < volumes.length; v++) {
+        if (volumes[v].mounted && volumes[v].fsavail > 0) return formatBytes(volumes[v].fsavail) + extra
+      }
+    }
+    return ""
+  }
+  return ""
+}
+
+// ------------------------------------------------------------------ trash
+//
+// Removable media collects a .Trash-<uid> that nothing surfaces, so a stick
+// can be "full" of files the user believes they deleted. Both layouts in the
+// freedesktop spec are checked.
+
+function trashCandidates(mountpoint, uid) {
+  var mount = clean(mountpoint)
+  if (mount === "" || uid === undefined || uid === null) return []
+  return [mount + "/.Trash-" + uid, mount + "/.Trash/" + uid]
+}
+
+// The guard in front of a recursive delete. A path qualifies only by being
+// exactly one of the candidates of a mount point we are currently tracking —
+// never by pattern-matching, so a crafted label or a stale path cannot widen
+// what gets removed.
+function isSafeTrashPath(path, mountpoints, uid) {
+  var target = clean(path)
+  if (target === "") return false
+  for (var i = 0; i < (mountpoints || []).length; i++) {
+    var candidates = trashCandidates(mountpoints[i], uid)
+    for (var c = 0; c < candidates.length; c++) {
+      if (candidates[c] === target) return true
+    }
+  }
+  return false
+}
+
+// `du -sb` prints "<bytes>\t<path>" per line, and complains to stderr about
+// the candidates that do not exist — which is most of them.
+function parseSizes(raw) {
+  var out = {}
+  var lines = String(raw || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var match = lines[i].match(/^(\d+)\s+(.+)$/)
+    if (match) out[match[2].replace(/\s+$/, "")] = Number(match[1])
+  }
+  return out
+}
+
+// ------------------------------------------------------- per-drive memory
+
+// A key that survives replugging, so a nickname sticks to the drive rather
+// than to whichever /dev node it lands on. Serial is best; a partition UUID
+// is the fallback for drives that report none, and the last resort merely
+// distinguishes two different models rather than two identical sticks.
+function driveKey(device) {
+  if (!device) return ""
+  var serial = clean(device.serial)
+  if (serial !== "") return "serial:" + serial
+  for (var i = 0; i < device.volumes.length; i++) {
+    var uuid = clean(device.volumes[i].uuid)
+    if (uuid !== "") return "uuid:" + uuid
+  }
+  return "model:" + clean(device.title) + ":" + device.sizeBytes
+}
+
+function driveSettings(store, device) {
+  var key = driveKey(device)
+  if (key === "" || !store || !store.drives) return {}
+  return store.drives[key] || {}
+}
+
+// Nicknames are applied after parsing so everything downstream — the panel,
+// the bar label, notifications — says the name the user chose without each
+// caller having to remember to look it up.
+function applyStore(devices, store) {
+  for (var i = 0; i < devices.length; i++) {
+    var saved = driveSettings(store, devices[i])
+    var nickname = clean(saved.nickname)
+    devices[i].key = driveKey(devices[i])
+    devices[i].nickname = nickname
+    devices[i].deviceName = devices[i].title
+    if (nickname !== "") devices[i].title = nickname
+  }
+  return devices
+}
+
+function withDriveSetting(store, device, name, value) {
+  var next = { version: 1, drives: {} }
+  if (store && store.drives) {
+    for (var k in store.drives) next.drives[k] = store.drives[k]
+  }
+  var key = driveKey(device)
+  if (key === "") return next
+  var entry = {}
+  var existing = next.drives[key] || {}
+  for (var f in existing) entry[f] = existing[f]
+  if (value === null || value === "" || value === undefined) delete entry[name]
+  else entry[name] = value
+  if (Object.keys(entry).length === 0) delete next.drives[key]
+  else next.drives[key] = entry
+  return next
+}
+
+function parseStore(raw) {
+  try {
+    var parsed = JSON.parse(String(raw || "").replace(/^\s+|\s+$/g, "") || "{}")
+    if (!parsed || typeof parsed !== "object") return { version: 1, drives: {} }
+    return { version: 1, drives: parsed.drives || {} }
+  } catch (e) {
+    return { version: 1, drives: {} }
+  }
+}
+
+// ------------------------------------------------------- phones & cameras
+//
+// A phone is not a block device — it speaks MTP, and gvfs is what mounts it.
+// `gio mount -li` prints nested Drive/Volume/Mount blocks; the ones that
+// matter identify themselves either by their volume-monitor type or by an
+// mtp:// / gphoto2:// URI, so either signal is enough to catch one.
+
+var PORTABLE_URI = /^(mtp|gphoto2|afc):\/\//
+
+function isPortableType(typeLine) {
+  return /MTP|GPhoto2|Afc/i.test(String(typeLine || ""))
+}
+
+function parseGioMounts(raw) {
+  var out = []
+  var lines = String(raw || "").split("\n")
+  var current = null
+
+  function flush() {
+    if (!current) return
+    var isPortable = isPortableType(current.type) || PORTABLE_URI.test(current.uri)
+    if (isPortable && clean(current.name) !== "") {
+      out.push({
+        name: clean(current.name),
+        uri: clean(current.uri),
+        mounted: current.mounted === true,
+        kind: /gphoto2/i.test(current.uri) || /GPhoto2/i.test(current.type) ? "camera" : "phone"
+      })
+    }
+    current = null
+  }
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i]
+
+    // A new Volume or Drive block ends the previous one. Volumes are what
+    // can be mounted, so a Drive block only starts one when no Volume
+    // follows it — flushing on both keeps the two cases from merging.
+    var volume = line.match(/^\s*Volume\(\d+\):\s*(.+?)\s*$/)
+    if (volume) {
+      flush()
+      current = { name: volume[1], type: "", uri: "", mounted: false }
+      continue
+    }
+    var drive = line.match(/^\s*Drive\(\d+\):\s*(.+?)\s*$/)
+    if (drive) {
+      flush()
+      current = { name: drive[1], type: "", uri: "", mounted: false }
+      continue
+    }
+    if (!current) continue
+
+    var type = line.match(/^\s*Type:\s*(.+?)\s*$/)
+    if (type) {
+      if (current.type === "") current.type = type[1]
+      continue
+    }
+    var activation = line.match(/^\s*activation_root=(\S+)\s*$/)
+    if (activation) {
+      if (current.uri === "") current.uri = activation[1]
+      continue
+    }
+    // "Mount(0): Pixel 7 -> mtp://Google_Pixel_7_1234/" — the arrow target is
+    // the URI, and the presence of the line is what says it is mounted.
+    var mount = line.match(/^\s*Mount\(\d+\):\s*.*?->\s*(\S+)\s*$/)
+    if (mount) {
+      current.mounted = true
+      current.uri = mount[1]
+      continue
+    }
+  }
+  flush()
+
+  // gvfs reports one phone as both a Drive and a Volume under the same
+  // display name, and only the Volume carries the URI. Merge by name so the
+  // pair becomes one row that knows both its URI and whether it is mounted.
+  var byName = {}
+  var ordered = []
+  for (var o = 0; o < out.length; o++) {
+    var entry = out[o]
+    var seen = byName[entry.name]
+    if (seen) {
+      if (seen.uri === "" && entry.uri !== "") seen.uri = entry.uri
+      if (entry.mounted) seen.mounted = true
+      if (entry.kind === "camera") seen.kind = "camera"
+      continue
+    }
+    byName[entry.name] = entry
+    ordered.push(entry)
+  }
+
+  // A device with no URI — a phone still locked, so gvfs has published the
+  // drive but no volume — offers nothing to mount or open, so it is left out
+  // rather than drawn as a row whose buttons do nothing.
+  var actionable = []
+  for (var a = 0; a < ordered.length; a++) {
+    if (ordered[a].uri !== "") actionable.push(ordered[a])
+  }
+  return actionable
+}
+
+function portableGlyph(entry) {
+  return entry && entry.kind === "camera" ? GLYPH_CAMERA : GLYPH_PHONE
+}
+
+function portableMeta(entry) {
+  if (!entry) return ""
+  if (!entry.mounted) return "Not mounted"
+  return entry.kind === "camera" ? "Camera · mounted" : "Phone · mounted"
 }

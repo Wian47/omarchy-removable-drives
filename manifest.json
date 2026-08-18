@@ -6,7 +6,7 @@
   "author": "Wian Schoeman",
   "license": "MIT",
   "homepage": "https://github.com/Wian47/omarchy-removable-drives",
-  "description": "USB sticks, SD cards, and external drives in the Omarchy bar: mount, open, and safely eject.",
+  "description": "USB sticks, SD cards, phones, and external drives in the Omarchy bar: mount, open, and safely eject.",
   "kinds": [
     "bar-widget"
   ],
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Removable Drives",
-    "description": "Appears only when a removable drive is attached. Mount, open, and power off USB sticks, SD cards, and external disks without a terminal.",
+    "description": "Appears only when something removable is attached. Mount, open, and power off drives and phones without a terminal.",
     "category": "Files",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -24,7 +24,8 @@
       "openOnMount": true,
       "notifications": true,
       "fileManager": "",
-      "refreshIntervalSec": 8
+      "refreshIntervalSec": 8,
+      "barLabel": "none"
     },
     "schema": [
       {
@@ -33,6 +34,19 @@
         "label": "Notify on connect and remove",
         "defaultValue": true,
         "description": "Announce drives as they are plugged in, and warn when one is unplugged while still mounted."
+      },
+      {
+        "key": "barLabel",
+        "type": "enum",
+        "label": "Text beside the icon",
+        "options": [
+          "none",
+          "free",
+          "name",
+          "count"
+        ],
+        "defaultValue": "none",
+        "description": "Show free space, the drive's name, or how many are attached. Vertical bars stay icon-only."
       },
       {
         "key": "alwaysShow",
