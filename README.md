@@ -34,6 +34,19 @@ popup ────────────────────────�
   mounting.
 - **Eject properly**: unmounts every volume on the drive, re-locks anything
   encrypted, then powers the device down so it is genuinely safe to pull.
+- **Knows when the drive is still being written to.** The bar icon turns urgent
+  while the kernel has I/O in flight, and the panel shows the live rate. A copy
+  dialog reaching 100% is not the moment a stick is safe to pull; the kernel's
+  own counters in `/sys/block/<dev>/stat` are.
+- **An eject asked for mid-copy is held, not refused.** It fires by itself once
+  the drive has been quiet for two consecutive seconds, and can be called off
+  until then.
+- **Says who is holding a busy mount.** udisks reports `target is busy` and
+  stops there; this asks `fuser` and names the processes, then offers a lazy
+  unmount as an explicit second choice.
+- **Announces drives** as they are plugged in, and warns loudly when one is
+  unplugged while a filesystem is still mounted.
+- **Eject all** in one action, for packing up.
 - **Free space at a glance**, with a usage bar that turns urgent past 90%.
 - **Reacts instantly.** A `udevadm` event stream means the panel updates the
   moment a drive appears, rather than up to a poll interval later.
@@ -70,7 +83,8 @@ Omarchy.
 | Volume row | click = mount (and open), or open if already mounted |
 | 󰄠 / 󰄝 | mount / unmount that volume |
 | 󰝰 | open that volume in the file manager |
-| ⏏ | eject the whole drive |
+| ⏏ | eject the whole drive (or cancel a deferred eject) |
+| ⏏ in the header | eject every attached drive |
 
 Keyboard, while the panel is open:
 
@@ -81,6 +95,8 @@ Keyboard, while the panel is open:
 | `m` | mount or unmount the selected volume |
 | `o` | open the selected volume |
 | `e` or `x` | eject the selected drive |
+| `E` | eject every drive |
+| `t` | open a terminal at the selected volume |
 | `r` | rescan |
 | `Esc` | close |
 
@@ -93,6 +109,7 @@ Setup > Plugins.
 |---|---|---|
 | `alwaysShow` | `false` | Keep the icon in the bar even with nothing attached |
 | `openOnMount` | `true` | Open the file manager once a volume finishes mounting |
+| `notifications` | `true` | Announce drives on connect, and warn when one is pulled while mounted |
 | `fileManager` | `""` | Command used to open a mount point; empty means `xdg-open` |
 | `refreshIntervalSec` | `8` | How often free space is re-read *while the panel is open*. Drives are still detected instantly either way. |
 
@@ -109,8 +126,14 @@ can drive it:
 omarchy-shell removable-drives toggle
 omarchy-shell removable-drives list            # every drive and volume, as JSON
 omarchy-shell removable-drives eject /dev/sdb  # unmount, lock, power off
+omarchy-shell removable-drives ejectAll
+omarchy-shell removable-drives status          # {"devices":1,"busy":false,...}
 omarchy-shell removable-drives refresh
 ```
+
+`status` reports `busy: true` while the kernel still has I/O in flight, so a
+backup script can wait for the drive to settle before telling someone to pull
+it. Both eject calls wait for pending writes by themselves.
 
 ## How it works
 
@@ -118,7 +141,7 @@ omarchy-shell removable-drives refresh
 |---|---|
 | `Panel.qml` | Bar icon and popup: rows, keyboard cursor, actions |
 | `Service.qml` | Everything that touches the system: `lsblk`, `udevadm`, `udisksctl` |
-| `Model.js` | Pure parsing and formatting — no QML, no processes |
+| `Model.js` | Pure parsing, formatting, and the I/O-activity maths — no QML, no processes |
 | `test/model.test.js` | Tests for the parsing rules, runnable without a compositor |
 
 Nothing runs as root and nothing is installed system-wide. Mounting a removable
@@ -126,7 +149,7 @@ filesystem is `allow_active: yes` in the stock udisks2 policy, which is why no
 password is asked for; anything needing more than that is handed to a terminal.
 
 ```bash
-node test/model.test.js       # 20 tests, no compositor required
+node test/model.test.js       # 38 tests, no compositor required
 omarchy plugin validate .     # manifest check the shell itself would apply
 ```
 

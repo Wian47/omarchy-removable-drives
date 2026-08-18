@@ -160,7 +160,8 @@ Panel {
     function list(): string { return JSON.stringify(drives.devices) }
 
     // Eject by device path ("/dev/sdb") so a keybind or script can safely
-    // remove a drive without opening the panel.
+    // remove a drive without opening the panel. Both eject calls wait for
+    // pending writes to finish before cutting power.
     function eject(path: string): string {
       for (var i = 0; i < drives.devices.length; i++) {
         if (drives.devices[i].path === path) {
@@ -170,6 +171,24 @@ Panel {
       }
       return "unknown device: " + path
     }
+
+    function ejectAll(): string {
+      if (drives.devices.length === 0) return "no drives attached"
+      drives.ejectAll()
+      return "ok"
+    }
+
+    // "busy" while the kernel still has I/O in flight — a script can poll
+    // this before telling someone it is safe to pull the drive.
+    function status(): string {
+      return JSON.stringify({
+        devices: drives.deviceCount,
+        mounted: drives.mountedCount,
+        busy: drives.anyBusy,
+        writeRate: Math.round(drives.totalWriteRate),
+        pendingEject: drives.pendingEjectPath
+      })
+    }
   }
 
   BarIconButton {
@@ -177,8 +196,14 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     text: Model.barGlyph(root.devices)
-    tooltipText: Model.summary(root.devices)
-    active: drives.busy
+    // The icon turns urgent while the kernel still has I/O in flight. That is
+    // the whole warning: if it is lit, the drive is not safe to pull yet.
+    tooltipText: drives.anyBusy
+      ? (Model.formatRate(drives.totalWriteRate) !== ""
+          ? "Writing " + Model.formatRate(drives.totalWriteRate) + " — do not remove"
+          : "Busy — do not remove")
+      : Model.summary(root.devices)
+    active: drives.anyBusy
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) {
         drives.refresh()
@@ -218,8 +243,10 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
         if (text === "r" || text === "R") drives.refresh()
-        else if (text === "e" || text === "E") root.ejectCurrent()
+        else if (text === "e") root.ejectCurrent()
+        else if (text === "E") drives.ejectAll()
         else if (text === "o" || text === "O") drives.openVolume(root.currentVolume())
+        else if (text === "t" || text === "T") drives.openTerminal(root.currentVolume())
         else if (text === "m" || text === "M") drives.toggleMount(root.currentVolume(), root.openOnMount)
       }
 
@@ -243,7 +270,11 @@ Panel {
             id: hero
             width: parent.width
             title: "Removable drives"
-            meta: Model.summary(root.devices)
+            meta: drives.anyBusy
+              ? (Model.formatRate(drives.totalWriteRate) !== ""
+                  ? "Writing " + Model.formatRate(drives.totalWriteRate) + " — do not remove"
+                  : "Busy — do not remove")
+              : Model.summary(root.devices)
             foreground: root.foreground
             fontFamily: root.fontFamily
             iconComponent: Component {
@@ -255,13 +286,28 @@ Panel {
               }
             }
             trailingControl: Component {
-              PanelActionButton {
-                iconText: Model.GLYPH_REFRESH
-                tooltipText: "Rescan"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                enabled: !drives.refreshing
-                onClicked: drives.refresh()
+              Row {
+                spacing: Style.space(2)
+
+                PanelActionButton {
+                  visible: root.devices.length > 1
+                  iconText: Model.GLYPH_EJECT
+                  tooltipText: "Eject every drive"
+                  foreground: root.foreground
+                  hoverColor: root.urgent
+                  fontFamily: root.fontFamily
+                  enabled: !drives.busy
+                  onClicked: drives.ejectAll()
+                }
+
+                PanelActionButton {
+                  iconText: Model.GLYPH_REFRESH
+                  tooltipText: "Rescan"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  enabled: !drives.refreshing
+                  onClicked: drives.refresh()
+                }
               }
             }
           }
@@ -274,6 +320,61 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
+          }
+
+          // udisks says "Target is busy" and stops there. This says who, and
+          // offers the lazy unmount as an explicit second choice rather than
+          // doing it silently on the user's behalf.
+          RowLayout {
+            visible: drives.blockers.length > 0
+            width: parent.width
+            spacing: Style.space(8)
+
+            Text {
+              Layout.fillWidth: true
+              text: "Held by " + Model.describeBlockers(drives.blockers)
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
+
+            PanelActionButton {
+              iconText: Model.GLYPH_UNMOUNT
+              tooltipText: "Unmount anyway (lazy unmount)"
+              foreground: root.foreground
+              hoverColor: root.urgent
+              fontFamily: root.fontFamily
+              enabled: !drives.busy && drives.blockedFsPath !== ""
+              Layout.alignment: Qt.AlignVCenter
+              onClicked: drives.forceUnmountBlocked()
+            }
+          }
+
+          // An eject asked for mid-copy is held, not refused; it fires by
+          // itself once the drive settles, and can be called off until then.
+          RowLayout {
+            visible: drives.pendingEjectPath !== ""
+            width: parent.width
+            spacing: Style.space(8)
+
+            Text {
+              Layout.fillWidth: true
+              text: "Ejecting once writes finish…"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
+
+            PanelActionButton {
+              iconText: Model.GLYPH_ALERT
+              tooltipText: "Cancel"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              Layout.alignment: Qt.AlignVCenter
+              onClicked: drives.cancelPendingEject()
+            }
           }
 
           Text {
@@ -333,6 +434,9 @@ Panel {
 
     readonly property bool selected: root.cursorActive && root.currentRow
       && root.currentRow.kind === "device" && root.currentRow.device === deviceIndex
+    readonly property string activity: device ? drives.activityLabelFor(device) : ""
+    readonly property bool ejectPending: device
+      && (drives.pendingEjectPath === device.path || drives.pendingEjectPath === "*")
 
     hasCursor: selected
     foreground: root.foreground
@@ -380,10 +484,13 @@ Panel {
 
         Text {
           Layout.fillWidth: true
-          text: deviceRow.device
-            ? deviceRow.device.sizeText + (deviceRow.device.tran !== "" ? " · " + deviceRow.device.tran.toUpperCase() : "")
-            : ""
-          color: root.dim
+          text: {
+            if (!deviceRow.device) return ""
+            var base = deviceRow.device.sizeText
+              + (deviceRow.device.tran !== "" ? " · " + deviceRow.device.tran.toUpperCase() : "")
+            return deviceRow.activity !== "" ? base + " · " + deviceRow.activity : base
+          }
+          color: deviceRow.activity !== "" ? root.urgent : root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
@@ -392,14 +499,19 @@ Panel {
 
       PanelActionButton {
         iconText: Model.GLYPH_EJECT
-        tooltipText: "Eject — unmount and power off"
-        foreground: root.foreground
+        tooltipText: deviceRow.ejectPending
+          ? "Waiting for writes to finish — click to cancel"
+          : "Eject — unmount and power off"
+        foreground: deviceRow.ejectPending ? root.urgent : root.foreground
         hoverColor: root.urgent
         fontFamily: root.fontFamily
         enabled: !drives.busy
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfDevice(deviceRow.deviceIndex)) }
-        onClicked: drives.eject(deviceRow.device)
+        onClicked: {
+          if (deviceRow.ejectPending) drives.cancelPendingEject()
+          else drives.eject(deviceRow.device)
+        }
       }
     }
   }

@@ -290,3 +290,154 @@ function formatError(text) {
   if (t === "") return ""
   return t.length > 160 ? t.substring(0, 157) + "…" : t
 }
+
+// ---------------------------------------------------------------- activity
+//
+// A drive is only safe to pull once the kernel has finished writing to it,
+// and the file manager's progress bar reaching 100% is not that moment —
+// pages can still be in flight after the copy dialog closes. The kernel
+// publishes the truth in /sys/block/<name>/stat, so read it rather than
+// guess.
+
+var SECTOR_BYTES = 512
+
+// Parses `head -v -n1 /sys/block/<name>/stat ...`:
+//
+//   ==> /sys/block/sda/stat <==
+//   79 4 7904 89 0 0 0 0 0 60 89
+//
+// Fields, 1-indexed: 1 read_ios, 2 read_merges, 3 read_sectors, 4 read_ticks,
+// 5 write_ios, 6 write_merges, 7 write_sectors, 8 write_ticks, 9 in_flight.
+function parseBlockStats(raw) {
+  var out = {}
+  var lines = String(raw || "").split("\n")
+  var name = ""
+  for (var i = 0; i < lines.length; i++) {
+    var header = lines[i].match(/^==>\s*\/sys\/block\/([^\/]+)\/stat\s*<==/)
+    if (header) {
+      name = header[1]
+      continue
+    }
+    if (name === "") continue
+    var fields = clean(lines[i]).split(" ")
+    if (fields.length >= 9) {
+      out[name] = {
+        readSectors: Number(fields[2]),
+        writeSectors: Number(fields[6]),
+        inFlight: Number(fields[8])
+      }
+    }
+    name = ""
+  }
+  return out
+}
+
+// Counters restart at zero when a device is unplugged and comes back, so a
+// negative delta means "this is a different device now", not "negative
+// throughput".
+function rateBetween(previousSectors, currentSectors, elapsedMs) {
+  if (previousSectors === null || previousSectors === undefined) return 0
+  if (!(elapsedMs > 0)) return 0
+  var delta = Number(currentSectors) - Number(previousSectors)
+  if (!isFinite(delta) || delta <= 0) return 0
+  return (delta * SECTOR_BYTES) / (elapsedMs / 1000)
+}
+
+function buildActivity(previousSamples, stats, now) {
+  var activity = {}
+  var samples = {}
+  for (var name in stats) {
+    var current = stats[name]
+    var previous = previousSamples ? previousSamples[name] : null
+    var elapsed = previous ? now - previous.at : 0
+    var writeRate = rateBetween(previous ? previous.writeSectors : null, current.writeSectors, elapsed)
+    var readRate = rateBetween(previous ? previous.readSectors : null, current.readSectors, elapsed)
+    activity[name] = {
+      writeRate: writeRate,
+      readRate: readRate,
+      inFlight: current.inFlight,
+      writing: writeRate > 0,
+      busy: writeRate > 0 || current.inFlight > 0
+    }
+    samples[name] = { writeSectors: current.writeSectors, readSectors: current.readSectors, at: now }
+  }
+  return { activity: activity, samples: samples }
+}
+
+// Below a kilobyte a second there is nothing worth showing; the number would
+// flicker between "0 B/s" and "512 B/s" on an idle drive.
+function formatRate(bytesPerSecond) {
+  var n = Number(bytesPerSecond)
+  if (!isFinite(n) || n < 1024) return ""
+  return formatBytes(n) + "/s"
+}
+
+function activityLabel(entry) {
+  if (!entry) return ""
+  var write = formatRate(entry.writeRate)
+  if (write !== "") return "Writing " + write
+  var read = formatRate(entry.readRate)
+  if (read !== "") return "Reading " + read
+  if (entry.busy) return "Busy"
+  return ""
+}
+
+// --------------------------------------------------------------- blockers
+
+// `ps -o pid=,comm= -p <pids>` prints "  4821 nautilus" per line.
+function parseBlockers(raw) {
+  var out = []
+  var lines = String(raw || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var match = clean(lines[i]).match(/^(\d+)\s+(.+)$/)
+    if (match) out.push({ pid: Number(match[1]), name: match[2] })
+  }
+  return out
+}
+
+// Names, not pids, and deduplicated: five nautilus threads holding a mount is
+// one thing to close, not five.
+function describeBlockers(blockers) {
+  if (!blockers || blockers.length === 0) return ""
+  var names = []
+  for (var i = 0; i < blockers.length; i++) {
+    if (names.indexOf(blockers[i].name) === -1) names.push(blockers[i].name)
+  }
+  if (names.length <= 3) return names.join(", ")
+  return names.slice(0, 3).join(", ") + " and " + (names.length - 3) + " more"
+}
+
+// ---------------------------------------------------------------- arrivals
+
+function deviceDiff(previous, current) {
+  var previousPaths = {}
+  var currentPaths = {}
+  var added = []
+  var removed = []
+  var i
+  for (i = 0; i < (previous || []).length; i++) previousPaths[previous[i].path] = true
+  for (i = 0; i < (current || []).length; i++) currentPaths[current[i].path] = true
+  for (i = 0; i < (current || []).length; i++) {
+    if (!previousPaths[current[i].path]) added.push(current[i])
+  }
+  for (i = 0; i < (previous || []).length; i++) {
+    if (!currentPaths[previous[i].path]) removed.push(previous[i])
+  }
+  return { added: added, removed: removed }
+}
+
+function connectedSummary(device) {
+  if (!device) return ""
+  var count = device.volumes.length
+  var volumes = count === 1 ? "1 volume" : count + " volumes"
+  return device.sizeText + " · " + volumes
+}
+
+// The quiet-streak rule behind a deferred eject. Throughput dips to zero
+// between bursts of a copy, so a single idle sample does not mean the drive is
+// finished; only a run of them does.
+function advanceQuiet(stillBusy, quietTicks, requiredTicks) {
+  if (stillBusy) return { quietTicks: 0, run: false }
+  var next = Number(quietTicks || 0) + 1
+  return { quietTicks: next, run: next >= requiredTicks }
+}

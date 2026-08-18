@@ -212,5 +212,150 @@ test("every glyph is a single private-use codepoint", () => {
   }
 })
 
+console.log("\nactivity")
+
+const STAT_SDA = `==> /sys/block/sda/stat <==
+      79        4     7904       89        0        0        0        0        0       60       89
+==> /sys/block/sdb/stat <==
+     100        0    10000      100      200        0    40000      300        3      500      600`
+
+test("reads the kernel I/O counters for every attached drive", () => {
+  const stats = api.parseBlockStats(STAT_SDA)
+  assert.deepStrictEqual(Object.keys(stats), ["sda", "sdb"])
+  assert.strictEqual(stats.sda.writeSectors, 0)
+  assert.strictEqual(stats.sda.inFlight, 0)
+  assert.strictEqual(stats.sdb.writeSectors, 40000)
+  assert.strictEqual(stats.sdb.inFlight, 3)
+})
+
+test("survives a truncated or empty stat read", () => {
+  assert.deepStrictEqual(api.parseBlockStats(""), {})
+  assert.deepStrictEqual(api.parseBlockStats("==> /sys/block/sda/stat <==\n"), {})
+  assert.deepStrictEqual(api.parseBlockStats("garbage"), {})
+})
+
+test("turns two samples into a write rate", () => {
+  // 2048 sectors of 512 bytes in one second = 1 MB/s.
+  assert.strictEqual(api.rateBetween(0, 2048, 1000), 1024 * 1024)
+  assert.strictEqual(api.rateBetween(1000, 1000, 1000), 0)
+})
+
+test("a counter that went backwards means a new device, not negative speed", () => {
+  // Unplug and replug: the kernel restarts the counters at zero.
+  assert.strictEqual(api.rateBetween(50000, 12, 1000), 0)
+})
+
+test("the first sample of a drive reports no rate, having nothing to compare", () => {
+  assert.strictEqual(api.rateBetween(null, 40000, 1000), 0)
+  const built = api.buildActivity({}, api.parseBlockStats(STAT_SDA), 1000)
+  assert.strictEqual(built.activity.sdb.writeRate, 0)
+  assert.strictEqual(built.activity.sdb.writing, false)
+})
+
+test("in-flight requests count as busy even at zero throughput", () => {
+  // The dangerous moment: the copy dialog has closed, the counters have
+  // stopped moving, and the kernel is still draining its queue.
+  const built = api.buildActivity({}, api.parseBlockStats(STAT_SDA), 1000)
+  assert.strictEqual(built.activity.sdb.busy, true, "3 requests in flight is busy")
+  assert.strictEqual(built.activity.sda.busy, false, "an idle drive is not busy")
+})
+
+test("a second sample reports the rate between them", () => {
+  const first = api.buildActivity({}, api.parseBlockStats(STAT_SDA), 1000)
+  const later = STAT_SDA.replace("      200        0    40000", "      200        0    42048")
+  const second = api.buildActivity(first.samples, api.parseBlockStats(later), 2000)
+  assert.strictEqual(second.activity.sdb.writeRate, 1024 * 1024)
+  assert.strictEqual(second.activity.sdb.writing, true)
+  assert.strictEqual(api.activityLabel(second.activity.sdb), "Writing 1.0 MB/s")
+})
+
+test("hides rates too small to be meaningful", () => {
+  assert.strictEqual(api.formatRate(0), "")
+  assert.strictEqual(api.formatRate(400), "")
+  assert.strictEqual(api.formatRate(1024 * 1024 * 24), "24.0 MB/s")
+})
+
+test("labels a busy but idle-looking drive rather than saying nothing", () => {
+  assert.strictEqual(api.activityLabel({ writeRate: 0, readRate: 0, inFlight: 2, busy: true }), "Busy")
+  assert.strictEqual(api.activityLabel({ writeRate: 0, readRate: 0, inFlight: 0, busy: false }), "")
+  assert.strictEqual(api.activityLabel(null), "")
+})
+
+test("a deferred eject waits for a run of quiet samples, not just one", () => {
+  // A copy in progress dips to zero between bursts; firing on the first idle
+  // sample would cut power mid-transfer.
+  let ticks = 0
+  let step = api.advanceQuiet(true, ticks, 2)
+  assert.deepStrictEqual(step, { quietTicks: 0, run: false }, "busy resets the streak")
+
+  step = api.advanceQuiet(false, step.quietTicks, 2)
+  assert.deepStrictEqual(step, { quietTicks: 1, run: false }, "one quiet sample is not enough")
+
+  step = api.advanceQuiet(false, step.quietTicks, 2)
+  assert.deepStrictEqual(step, { quietTicks: 2, run: true }, "two in a row means finished")
+})
+
+test("a burst mid-wait sends the streak back to zero", () => {
+  let step = api.advanceQuiet(false, 0, 2)
+  assert.strictEqual(step.quietTicks, 1)
+  step = api.advanceQuiet(true, step.quietTicks, 2)
+  assert.strictEqual(step.quietTicks, 0, "the drive woke up again")
+  assert.strictEqual(step.run, false)
+})
+
+console.log("\nblockers")
+
+test("names the processes holding a mount", () => {
+  const raw = "   4821 nautilus\n   5102 mpv\n"
+  assert.deepStrictEqual(api.parseBlockers(raw), [
+    { pid: 4821, name: "nautilus" },
+    { pid: 5102, name: "mpv" }
+  ])
+  assert.strictEqual(api.describeBlockers(api.parseBlockers(raw)), "nautilus, mpv")
+})
+
+test("counts one program once, however many threads it holds open with", () => {
+  const many = api.parseBlockers("1 nautilus\n2 nautilus\n3 nautilus\n")
+  assert.strictEqual(api.describeBlockers(many), "nautilus")
+})
+
+test("summarises a long list instead of overflowing the row", () => {
+  const many = api.parseBlockers("1 a\n2 b\n3 c\n4 d\n5 e\n")
+  assert.strictEqual(api.describeBlockers(many), "a, b, c and 2 more")
+  assert.strictEqual(api.describeBlockers([]), "")
+})
+
+console.log("\narrivals and removals")
+
+const A = { path: "/dev/sda", title: "SanDisk", mountedCount: 1 }
+const B = { path: "/dev/sdb", title: "Kingston", mountedCount: 0 }
+
+test("spots a drive appearing and disappearing", () => {
+  assert.deepStrictEqual(api.deviceDiff([A], [A, B]).added.map(d => d.path), ["/dev/sdb"])
+  assert.deepStrictEqual(api.deviceDiff([A, B], [A]).removed.map(d => d.path), ["/dev/sdb"])
+  const quiet = api.deviceDiff([A, B], [A, B])
+  assert.strictEqual(quiet.added.length + quiet.removed.length, 0)
+})
+
+test("handles the first snapshot, when there is no previous list", () => {
+  assert.deepStrictEqual(api.deviceDiff([], [A]).added.map(d => d.path), ["/dev/sda"])
+  assert.deepStrictEqual(api.deviceDiff(undefined, [A]).added.map(d => d.path), ["/dev/sda"])
+})
+
+test("keeps the removed device object, so the warning can name it", () => {
+  // The removal notification needs to know it was still mounted, which is
+  // only knowable from the list we are throwing away.
+  const removed = api.deviceDiff([A], []).removed[0]
+  assert.strictEqual(removed.title, "SanDisk")
+  assert.strictEqual(removed.mountedCount, 1)
+})
+
+test("describes a drive the way a notification should read", () => {
+  const devices = api.parse(tree([disk({ children: [part({}), part({ name: "sdb2", path: "/dev/sdb2" })] })]))
+  assert.strictEqual(api.connectedSummary(devices[0]), "28.7 GB · 2 volumes")
+  const single = api.parse(tree([disk({ children: [part({})] })]))
+  assert.strictEqual(api.connectedSummary(single[0]), "28.7 GB · 1 volume")
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

@@ -22,10 +22,18 @@
     "defaults": {
       "alwaysShow": false,
       "openOnMount": true,
+      "notifications": true,
       "fileManager": "",
       "refreshIntervalSec": 8
     },
     "schema": [
+      {
+        "key": "notifications",
+        "type": "boolean",
+        "label": "Notify on connect and remove",
+        "defaultValue": true,
+        "description": "Announce drives as they are plugged in, and warn when one is unplugged while still mounted."
+      },
       {
         "key": "alwaysShow",
         "type": "boolean",
