@@ -50,6 +50,11 @@ Item {
   // them over MTP and lsblk never sees them.
   property var portables: []
 
+  // Which gvfs backends exist, and what is plugged in that none of them can
+  // reach. Drives the "install this to browse your phone" hint.
+  property var support: ({ backends: {}, devices: [] })
+  readonly property var supportHint: Model.supportHint(support)
+
   // Per-drive settings the user has saved, keyed so they survive replugging.
   property var store: ({ version: 1, drives: {} })
 
@@ -512,6 +517,15 @@ Item {
   function refreshPortables() {
     if (gioProcess.running) return
     gioProcess.running = true
+    if (!supportProcess.running) supportProcess.running = true
+  }
+
+  // A plugin cannot install anything itself, so this opens Omarchy's own
+  // installer in a floating terminal and lets the user decide there.
+  function installSupport() {
+    var hint = supportHint
+    if (!hint) return
+    Quickshell.execDetached(["omarchy-install-app", hint.label, hint.packages])
   }
 
   function mountPortable(entry) {
@@ -655,6 +669,18 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.portables = Model.parseGioMounts(text)
+    }
+  }
+
+  // One probe for both questions: which backends gvfs advertises, and what is
+  // on the USB bus. Root hubs (1d6b) are skipped; everything else reports its
+  // vendor and every interface class it exposes.
+  Process {
+    id: supportProcess
+    command: ["bash", "-c", 'for f in /usr/share/gvfs/mounts/*.mount; do [ -e "$f" ] || continue; n=$(basename "$f" .mount); echo "backend $n"; done; for d in /sys/bus/usb/devices/*/; do [ -r "$d/idVendor" ] || continue; v=$(cat "$d/idVendor" 2>/dev/null); [ "$v" = "1d6b" ] && continue; cls=""; for i in "$d"*:*/bInterfaceClass; do [ -r "$i" ] && cls="$cls,$(cat "$i" 2>/dev/null)"; done; echo "usb $v$cls $(cat "$d/product" 2>/dev/null)"; done']
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.support = Model.parseSupport(text)
     }
   }
 

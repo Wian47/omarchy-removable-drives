@@ -177,7 +177,7 @@ Panel {
     Qt.callLater(function() { scrollItemIntoView(root.cursorItem) })
   }
 
-  visible: devices.length > 0 || drives.portables.length > 0 || alwaysShow
+  visible: devices.length > 0 || drives.portables.length > 0 || drives.supportHint !== null || alwaysShow
   implicitWidth: button.item ? button.item.implicitWidth : 0
   implicitHeight: button.item ? button.item.implicitHeight : barSize
 
@@ -509,7 +509,7 @@ Panel {
           // they get their own section instead of being pushed into a list
           // that talks about partitions and free space.
           Column {
-            visible: drives.portables.length > 0
+            visible: drives.portables.length > 0 || drives.supportHint !== null
             width: parent.width
             spacing: Style.space(6)
 
@@ -519,6 +519,56 @@ Panel {
               text: "PHONES & CAMERAS"
               foreground: root.foreground
               fontFamily: root.fontFamily
+            }
+
+            // Something is plugged in that gvfs has no backend for. A plugin
+            // cannot install packages — Omarchy's installer never runs sudo —
+            // so this explains the gap and opens Omarchy's own installer
+            // rather than leaving the section mysteriously empty.
+            RowLayout {
+              visible: drives.supportHint !== null
+              width: parent.width
+              spacing: Style.space(8)
+
+              Text {
+                text: Model.GLYPH_ALERT
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.icon
+                Layout.alignment: Qt.AlignVCenter
+              }
+
+              ColumnLayout {
+                Layout.fillWidth: true
+                spacing: Style.space(1)
+
+                Text {
+                  Layout.fillWidth: true
+                  text: drives.supportHint ? drives.supportHint.text : ""
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                Text {
+                  Layout.fillWidth: true
+                  text: drives.supportHint ? "Installs " + drives.supportHint.detail : ""
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+              }
+
+              PanelActionButton {
+                iconText: Model.GLYPH_MOUNT
+                tooltipText: "Open Omarchy's installer for these packages"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                Layout.alignment: Qt.AlignVCenter
+                onClicked: drives.installSupport()
+              }
             }
 
             Repeater {

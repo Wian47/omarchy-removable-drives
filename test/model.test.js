@@ -578,5 +578,66 @@ test("gives phones their own navigation rows after the drives", () => {
   assert.deepStrictEqual(api.navRows([], [{ name: "Pixel 7" }]).map(r => r.kind), ["portable"])
 })
 
+console.log("\nbackend availability")
+
+// Real output shape from the probe: gvfs advertises its backends as
+// /usr/share/gvfs/mounts/<scheme>.mount, and sysfs reports each USB device's
+// vendor plus every interface class it exposes.
+const PROBE_NO_AFC = [
+  "backend mtp", "backend smb", "backend trash",
+  "usb 04f2,0e,0e,0e,0e,fe HP True Vision FHD Camera",
+  "usb 0781,08  SanDisk 3.2Gen1"
+].join("\n")
+
+test("reads which backends gvfs has and what is on the bus", () => {
+  const support = api.parseSupport(PROBE_NO_AFC)
+  assert.strictEqual(support.backends.mtp, true)
+  assert.strictEqual(support.backends.afc, undefined)
+  assert.strictEqual(support.devices.length, 2)
+  assert.strictEqual(support.devices[0].vendor, "04f2")
+  assert.deepStrictEqual(support.devices[0].classes, ["0e", "0e", "0e", "0e", "fe"])
+  assert.strictEqual(support.devices[1].name, "SanDisk 3.2Gen1")
+})
+
+test("says nothing when nothing needs saying", () => {
+  // A webcam and a USB stick are not phones; neither should raise a hint.
+  assert.strictEqual(api.supportHint(api.parseSupport(PROBE_NO_AFC)), null)
+  assert.strictEqual(api.supportHint(null), null)
+  assert.strictEqual(api.supportHint(api.parseSupport("")), null)
+})
+
+test("explains an iPhone that Linux cannot reach yet", () => {
+  const probe = PROBE_NO_AFC + "\nusb 05ac,06,ff,ff iPhone"
+  const hint = api.supportHint(api.parseSupport(probe))
+  assert.ok(hint, "an Apple device with no afc backend should raise a hint")
+  assert.ok(hint.text.includes("iPhone"))
+  assert.strictEqual(hint.packages, "usbmuxd gvfs-afc gvfs-gphoto2")
+})
+
+test("stops explaining once the backend is installed", () => {
+  const probe = PROBE_NO_AFC + "\nbackend afc\nusb 05ac,06,ff,ff iPhone"
+  assert.strictEqual(api.supportHint(api.parseSupport(probe)), null)
+})
+
+test("names an unnamed device generically rather than blankly", () => {
+  const hint = api.supportHint(api.parseSupport("backend mtp\nusb 05ac,06 "))
+  assert.ok(hint.text.startsWith("An Apple device"))
+})
+
+test("flags an imaging device when no backend can read it", () => {
+  const camera = "backend smb\nusb 04a9,06 Canon EOS"
+  const hint = api.supportHint(api.parseSupport(camera))
+  assert.ok(hint.text.includes("Canon EOS"))
+  assert.strictEqual(hint.packages, "gvfs-gphoto2")
+
+  // gvfs-mtp can already read many cameras, so its presence is enough.
+  assert.strictEqual(api.supportHint(api.parseSupport("backend mtp\nusb 04a9,06 Canon EOS")), null)
+})
+
+test("does not mistake a webcam for a camera it should mount", () => {
+  // A UVC webcam is interface class 0e, not 06 — mounting it is meaningless.
+  assert.strictEqual(api.supportHint(api.parseSupport("backend smb\nusb 04f2,0e Webcam")), null)
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

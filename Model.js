@@ -692,3 +692,75 @@ function portableMeta(entry) {
   if (!entry.mounted) return "Not mounted"
   return entry.kind === "camera" ? "Camera · mounted" : "Phone · mounted"
 }
+
+// -------------------------------------------------- backend availability
+//
+// A phone only appears here if gvfs has a backend that speaks its protocol:
+// gvfs-mtp for Android, gvfs-afc (plus the usbmuxd daemon) for an iPhone,
+// gvfs-gphoto2 for a camera. Omarchy ships gvfs-mtp, so Android works out of
+// the box and Apple does not. A plugin may not install packages — Omarchy's
+// plugin installer never runs sudo or install hooks — so the most it can
+// honestly do is notice the gap and offer to open an installer.
+//
+// gvfs advertises what it can mount in /usr/share/gvfs/mounts/<scheme>.mount,
+// which makes availability a file check rather than a guess.
+
+var APPLE_VENDOR = "05ac"
+var IMAGING_CLASS = "06"
+
+function parseSupport(raw) {
+  var backends = {}
+  var devices = []
+  var lines = String(raw || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var line = clean(lines[i])
+    if (line === "") continue
+
+    var backend = line.match(/^backend\s+(\S+)$/)
+    if (backend) {
+      backends[backend[1]] = true
+      continue
+    }
+    // "usb 05ac,06,ff iPhone" — vendor first, then every interface class the
+    // device exposes, then whatever name it reports.
+    var usb = line.match(/^usb\s+(\S+)\s*(.*)$/)
+    if (usb) {
+      var fields = usb[1].split(",")
+      devices.push({
+        vendor: fields[0] || "",
+        classes: fields.slice(1),
+        name: clean(usb[2])
+      })
+    }
+  }
+  return { backends: backends, devices: devices }
+}
+
+// What to say when something is plugged in that gvfs cannot reach. Silence
+// reads as a broken widget, which is the one outcome worth avoiding.
+function supportHint(support) {
+  if (!support) return null
+  var backends = support.backends || {}
+  var devices = support.devices || []
+
+  for (var i = 0; i < devices.length; i++) {
+    var device = devices[i]
+    if (device.vendor === APPLE_VENDOR && !backends.afc) {
+      return {
+        text: (device.name !== "" ? device.name : "An Apple device") + " is connected, but Linux needs two more packages to browse it",
+        detail: "usbmuxd and gvfs-afc",
+        packages: "usbmuxd gvfs-afc gvfs-gphoto2",
+        label: "iPhone support"
+      }
+    }
+    if (device.classes.indexOf(IMAGING_CLASS) !== -1 && !backends.gphoto2 && !backends.mtp) {
+      return {
+        text: (device.name !== "" ? device.name : "A camera") + " is connected, but no gvfs backend can read it",
+        detail: "gvfs-gphoto2",
+        packages: "gvfs-gphoto2",
+        label: "Camera support"
+      }
+    }
+  }
+  return null
+}

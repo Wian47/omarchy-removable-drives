@@ -85,6 +85,26 @@ omarchy plugin enable wian47.removable-drives --section right
 Requires Omarchy 4 (Quattro) and a running `udisks2` — both are standard on
 Omarchy.
 
+### Phones and cameras
+
+A phone appears only if gvfs has a backend that speaks its protocol. Omarchy
+ships `gvfs-mtp`, so **Android works out of the box**. Apple devices speak AFC
+instead, which needs two more packages:
+
+```bash
+sudo pacman -S --needed usbmuxd gvfs-afc gvfs-gphoto2
+```
+
+A plugin cannot install these for you — Omarchy's plugin installer never runs
+sudo or install hooks, by design. So when something is plugged in that gvfs
+cannot reach, the panel says which packages are missing and offers to open
+Omarchy's own installer, rather than showing an empty section and letting you
+wonder whether the widget is broken.
+
+Apple restricts what AFC exposes: expect the camera roll and per-app
+documents, not a general filesystem. The device must be unlocked and have
+trusted this computer.
+
 ## Using it
 
 | Where | Action |
