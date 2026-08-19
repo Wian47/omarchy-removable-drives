@@ -116,8 +116,9 @@ Item {
     return Math.max(min, Math.min(max, n))
   }
 
+  // Lives in Model.js so the escaping is covered by tests.
   function quote(value) {
-    return "'" + String(value || "").replace(/'/g, "'\\''") + "'"
+    return Model.shellQuote(value)
   }
 
   function deviceByPath(path) {

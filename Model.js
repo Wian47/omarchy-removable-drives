@@ -51,6 +51,14 @@ function plain(value) {
   return clean(value).replace(/[<>]/g, "")
 }
 
+// A mount point contains the filesystem label — /run/media/<user>/<LABEL> —
+// so it is device-controlled, and it is concatenated into the shell commands
+// that unmount and open it. POSIX single-quoting, with an embedded quote
+// closed and reopened, is what keeps a crafted label from breaking out.
+function shellQuote(value) {
+  return "'" + String(value === undefined || value === null ? "" : value).replace(/'/g, "'\\''") + "'"
+}
+
 function clean(value) {
   return String(value === undefined || value === null ? "" : value).replace(/\s+/g, " ").replace(/^ | $/g, "")
 }

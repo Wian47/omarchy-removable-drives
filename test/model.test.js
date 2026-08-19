@@ -816,6 +816,27 @@ test("sanitises what a notification would carry", () => {
   assert.ok(headline.endsWith(" connected"), "the rest of the sentence survives")
 })
 
+test("quotes a hostile mount point so it cannot break out of a shell command", () => {
+  // A mount point carries the filesystem label, so a stick can be formatted to
+  // put shell metacharacters into the path that unmount and open are built
+  // from. The quoting has to survive that, not the sanitiser — the path itself
+  // must stay exact.
+  const evil = "/run/media/x/a'; touch /tmp/PWNED; #"
+  const quoted = api.shellQuote(evil)
+  assert.strictEqual(quoted, "'/run/media/x/a'\\''; touch /tmp/PWNED; #'")
+  assert.ok(!quoted.includes("; touch /tmp/PWNED; #'" + '"'), "no unquoted tail")
+
+  // Round-trip: what a POSIX shell would parse back out of the quoted form.
+  const unquoted = quoted.slice(1, -1).split("'\\''").join("'")
+  assert.strictEqual(unquoted, evil, "the shell sees the original path, verbatim")
+})
+
+test("quotes the empty and null cases without producing bare quotes", () => {
+  assert.strictEqual(api.shellQuote(""), "''")
+  assert.strictEqual(api.shellQuote(null), "''")
+  assert.strictEqual(api.shellQuote("/run/media/x/PLAIN"), "'/run/media/x/PLAIN'")
+})
+
 test("keeps paths byte-exact, since commands are built from them", () => {
   // Sanitising is for display only. A mount point containing an angle bracket
   // is legal on Linux, and mangling it would unmount or open the wrong thing.
