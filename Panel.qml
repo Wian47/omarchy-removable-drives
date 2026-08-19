@@ -142,6 +142,13 @@ Panel {
     renamingKey = device.key
   }
 
+  // Closing the editor has to hand the keyboard back, or the key catcher stays
+  // blocked and j/k type into a field that is no longer visible.
+  function finishRename() {
+    renamingKey = ""
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
   // One click does the obvious thing: an unmounted volume mounts (and opens,
   // unless the user turned that off), a mounted one opens its folder.
   // Unmounting stays on its own button so it is never a stray click away.
@@ -182,9 +189,19 @@ Panel {
   implicitHeight: button.item ? button.item.implicitHeight : barSize
 
   onVisibleChanged: if (!visible && opened) close()
-  onRowsChanged: clampCursor()
+  onRowsChanged: {
+    clampCursor()
+    if (renamingKey !== "") {
+      var stillHere = false
+      for (var i = 0; i < devices.length; i++) {
+        if (devices[i].key === renamingKey) stillHere = true
+      }
+      if (!stillHere) renamingKey = ""
+    }
+  }
   onOpenedChanged: {
     drives.watchClosely = opened
+    renamingKey = ""
     if (opened) {
       cursorActive = false
       cursor = 0
@@ -610,17 +627,17 @@ Panel {
 
     onSelectedChanged: if (selected) root.cursorItem = deviceRow
 
+    // Both call back to the panel rather than to a sibling function or to
+    // keyCatcher directly: inside an inline component those names do not
+    // resolve, and the failure is silent enough to leave the editor stuck
+    // open with the key catcher still blocked. root.* is proven to resolve
+    // from these rows — setCursor is called the same way below.
     function commitRename(value) {
       drives.setNickname(device, value)
-      endRename()
+      root.finishRename()
     }
 
-    function cancelRename() { endRename() }
-
-    function endRename() {
-      root.renamingKey = ""
-      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
-    }
+    function cancelRename() { root.finishRename() }
 
     MouseArea {
       anchors.fill: parent
