@@ -8,25 +8,6 @@ open, and safely eject them without a terminal.
 The icon only exists while a drive does. Plug one in and it appears; pull it out
 and the bar goes back to what it was.
 
-```
-bar:  [󱊞]
-
-popup ──────────────────────────────────
- 󱊞  Removable drives
-    1 DRIVE · 1 MOUNTED                ⟳
-
- 󱊞  SanDisk Ultra                      ⏏
-    28.7 GB · USB
-
-    PHOTOS                          󰝰 󰄝
-    exFAT · 21.4 GB free · /run/media/…
-    ▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░
-
-    ARCHIVE                            󰄠
-    NTFS · 2.0 TB · Not mounted
-──────────────────────────────────────────
-```
-
 ## What it does
 
 - **Appears only when it is needed.** No drive attached, no icon in the bar.
