@@ -806,6 +806,16 @@ test("sanitises the bar label, which qs.Ui renders with a Text we cannot pin", (
   assert.ok(!label.includes("<") && !label.includes(">"), "got: " + label)
 })
 
+test("sanitises what a notification would carry", () => {
+  // Omarchy renders a notification body as StyledText and its summary with the
+  // default AutoText, and strips <img> from the body only — so the drive name
+  // going into the summary has to be clean before it leaves here.
+  const devices = api.parse(tree([disk({ model: BEACON, vendor: null, children: [part({})] })]))
+  const headline = api.plain(devices[0].title + " connected")
+  assert.ok(!headline.includes("<") && !headline.includes(">"), "got: " + headline)
+  assert.ok(headline.endsWith(" connected"), "the rest of the sentence survives")
+})
+
 test("keeps paths byte-exact, since commands are built from them", () => {
   // Sanitising is for display only. A mount point containing an angle bracket
   // is legal on Linux, and mangling it would unmount or open the wrong thing.

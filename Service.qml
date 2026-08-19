@@ -566,12 +566,18 @@ Item {
     actionStatus = "Copied " + volume.mountpoint
   }
 
+  // Device names reach the notification surface too, and that surface is not
+  // ours to pin: Omarchy renders the body as Text.StyledText and the summary
+  // with the default AutoText, stripping <img> from the body only. A drive
+  // label is chosen by whoever formatted the stick, so it is sanitised here —
+  // at the one point every notification passes through — rather than trusting
+  // whichever daemon draws it.
   function notify(headline, description, glyph, urgency) {
     if (!notificationsEnabled) return
     var command = ["omarchy-notification-send", "-g", glyph]
     if (urgency) command.push("-u", urgency)
-    command.push(headline)
-    if (description && description !== "") command.push(description)
+    command.push(Model.plain(headline))
+    if (description && description !== "") command.push(Model.plain(description))
     Quickshell.execDetached(command)
   }
 
