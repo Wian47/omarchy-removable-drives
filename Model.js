@@ -604,6 +604,7 @@ function parseGioMounts(raw) {
   var out = []
   var lines = String(raw || "").split("\n")
   var current = null
+  var mountsByName = {}
 
   function flush() {
     if (!current) return
@@ -657,14 +658,31 @@ function parseGioMounts(raw) {
     }
     // "Mount(0): Pixel 7 -> mtp://Google_Pixel_7_1234/" — the arrow target is
     // the URI, and the presence of the line is what says it is mounted.
-    var mount = line.match(/^\s*Mount\(\d+\):\s*.*?->\s*(\S+)\s*$/)
+    //
+    // gio also prints top-level Mount lines after every Drive and Volume
+    // block, so a mount belonging to one device can appear while a different
+    // block is still open. Matching on the name is what stops an iPhone's
+    // gphoto2 URI being overwritten by the afc mount listed after it.
+    var mount = line.match(/^\s*Mount\(\d+\):\s*(.*?)\s*->\s*(\S+)\s*$/)
     if (mount) {
-      current.mounted = true
-      current.uri = mount[1]
+      var mountName = clean(mount[1])
+      mountsByName[mountName] = mount[2]
+      if (mountName === clean(current.name)) {
+        current.mounted = true
+        if (current.uri === "") current.uri = mount[2]
+      }
       continue
     }
   }
   flush()
+
+  // Mounts listed outside any block still prove their device is mounted.
+  for (var m = 0; m < out.length; m++) {
+    if (mountsByName[out[m].name] !== undefined) {
+      out[m].mounted = true
+      if (out[m].uri === "") out[m].uri = mountsByName[out[m].name]
+    }
+  }
 
   // gvfs reports one phone as both a Drive and a Volume under the same
   // display name, and only the Volume carries the URI. Merge by name so the

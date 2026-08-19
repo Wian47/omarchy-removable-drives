@@ -604,6 +604,56 @@ test("an iPhone is a phone, even though gvfs calls it a camera", () => {
   assert.strictEqual(api.portableMeta(iphone), "Photos · mounted")
 })
 
+// A trusted iPhone publishes TWO gvfs volumes — afc for app documents and
+// gphoto2 for the camera roll — and gio repeats both as top-level Mount lines
+// after every block. Those trailing lines are why a mount must be matched to
+// its volume by name: attributing them positionally gave the iPhone the afc
+// URI and sent "browse" to the wrong place.
+const GIO_IPHONE_TRUSTED = `Drive(0): WD PC SN5000S SDEPNSJ-1T00-1006
+  Type: GProxyDrive (GProxyVolumeMonitorUDisks2)
+  Volume(0): 755 GB Volume
+    Type: GProxyVolume (GProxyVolumeMonitorUDisks2)
+Volume(0): Documents on Wian
+  Type: GProxyVolume (GProxyVolumeMonitorAfc)
+  activation_root=afc://00008140-00086450119B801C:3/
+  Mount(0): Documents on Wian -> afc://00008140-00086450119B801C:3/
+    Type: GProxyShadowMount (GProxyVolumeMonitorAfc)
+Volume(1): iPhone
+  Type: GProxyVolume (GProxyVolumeMonitorGPhoto2)
+  activation_root=gphoto2://Apple_Inc._iPhone_0000814000086450119B801C/
+  Mount(0): iPhone -> gphoto2://Apple_Inc._iPhone_0000814000086450119B801C/
+    Type: GProxyShadowMount (GProxyVolumeMonitorGPhoto2)
+Mount(2): iPhone -> gphoto2://Apple_Inc._iPhone_0000814000086450119B801C/
+Mount(3): Documents on Wian -> afc://00008140-00086450119B801C:3/`
+
+test("keeps a trusted iPhone's two mounts apart", () => {
+  const found = api.parseGioMounts(GIO_IPHONE_TRUSTED)
+  assert.strictEqual(found.length, 2, "app documents and the camera roll are separate")
+
+  const documents = found.find(e => e.name === "Documents on Wian")
+  const camera = found.find(e => e.name === "iPhone")
+
+  assert.strictEqual(documents.uri, "afc://00008140-00086450119B801C:3/")
+  assert.strictEqual(documents.access, "Files")
+  assert.strictEqual(camera.uri, "gphoto2://Apple_Inc._iPhone_0000814000086450119B801C/",
+    "a trailing afc Mount line must not steal the camera roll's URI")
+  assert.strictEqual(camera.access, "Photos")
+  assert.ok(found.every(e => e.mounted), "both are mounted")
+})
+
+test("a mount listed outside any block still marks its device mounted", () => {
+  // The volume declares itself with no nested Mount line; only the trailing
+  // top-level one says it is mounted.
+  const detached = `Volume(0): Pixel 7
+  Type: GProxyVolume (GProxyVolumeMonitorMTP)
+  activation_root=mtp://Google_Pixel_7_1A2B3C/
+Mount(0): Pixel 7 -> mtp://Google_Pixel_7_1A2B3C/`
+  const found = api.parseGioMounts(detached)
+  assert.strictEqual(found.length, 1)
+  assert.strictEqual(found[0].mounted, true)
+  assert.strictEqual(found[0].uri, "mtp://Google_Pixel_7_1A2B3C/")
+})
+
 test("an actual camera is still a camera", () => {
   const canon = api.parseGioMounts(`Volume(0): Canon EOS
     Type: GProxyVolume (GProxyVolumeMonitorGPhoto2)
