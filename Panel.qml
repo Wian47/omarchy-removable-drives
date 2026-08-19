@@ -113,10 +113,10 @@ Panel {
     else activateVolume(currentVolume())
   }
 
+  // Opening covers mounting, so a click always lands somewhere useful.
   function activatePortable(entry) {
     if (!entry) return
-    if (entry.mounted) drives.openPortable(entry)
-    else drives.mountPortable(entry)
+    drives.openPortable(entry)
   }
 
   function rowIndexOfPortable(portableIndex) {
@@ -789,7 +789,8 @@ Panel {
       }
 
       PanelActionButton {
-        visible: portableRow.entry && portableRow.entry.mounted
+        // Always offered: gio mounts the device on demand when it opens it.
+        visible: portableRow.entry && portableRow.entry.uri !== ""
         iconText: Model.GLYPH_FOLDER
         tooltipText: "Browse this device"
         foreground: root.foreground

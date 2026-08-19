@@ -544,9 +544,18 @@ Item {
     else mountPortable(entry)
   }
 
+  // Not xdg-open: nothing registers an x-scheme-handler for gphoto2://,
+  // afc:// or mtp://, so xdg-open exits 0 and silently does nothing. gio
+  // resolves the URI through GIO itself, which also mounts the device on
+  // demand — so browsing works whether or not it is mounted yet.
   function openPortable(entry) {
     if (!entry || entry.uri === "") return
-    Quickshell.execDetached(["uwsm-app", "--", "xdg-open", entry.uri])
+    var command = String(setting("fileManager", "")).replace(/^\s+|\s+$/g, "")
+    if (command !== "") {
+      Quickshell.execDetached(["bash", "-c", command + " " + quote(entry.uri)])
+      return
+    }
+    Quickshell.execDetached(["gio", "open", entry.uri])
   }
 
   // ------------------------------------------------------ small actions

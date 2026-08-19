@@ -101,9 +101,19 @@ cannot reach, the panel says which packages are missing and offers to open
 Omarchy's own installer, rather than showing an empty section and letting you
 wonder whether the widget is broken.
 
-Apple restricts what AFC exposes: expect the camera roll and per-app
-documents, not a general filesystem. The device must be unlocked and have
-trusted this computer.
+A trusted iPhone shows up as **two** entries, because iOS exposes two
+different things: `Documents on <device>` over AFC (the document folder of
+each app that opts into File Sharing) and the device name over PTP (the camera
+roll). The panel labels them `Files` and `Photos` accordingly.
+
+Apple restricts both: AFC is not a general filesystem, and PTP only sees
+photos that are physically on the device — with iCloud Photos set to "Optimize
+iPhone Storage", the originals live in iCloud and the camera roll can read as
+empty. The device must be unlocked and have trusted this computer.
+
+Browsing uses `gio open` rather than `xdg-open`, because nothing registers an
+`x-scheme-handler` for `gphoto2://`, `afc://`, or `mtp://` — `xdg-open` exits
+successfully and does nothing at all with them.
 
 ## Using it
 
