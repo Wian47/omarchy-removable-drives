@@ -146,6 +146,13 @@ pending writes by themselves.
 touches the system, and `Model.js` is pure parsing and formatting with no QML
 or processes — which is what makes it testable without a compositor.
 
+Device-supplied strings — labels, vendor names, phone names — are hostile
+input: whoever formatted a stick chooses its label. Every `Text` is pinned to
+`Text.PlainText` so Qt cannot promote one to rich text and fetch a remote
+`<img>`, and strings handed to components whose `Text` this plugin does not own
+are stripped of angle brackets first. Paths stay byte-exact, since commands are
+built from them.
+
 Emptying a drive's trash is the only recursive delete here, so the path is
 re-derived from the live mount list and must exactly match a `.Trash-<uid>`
 candidate of a mounted removable volume. The tests assert it refuses `/`,

@@ -778,5 +778,42 @@ test("does not mistake a webcam for a camera it should mount", () => {
   assert.strictEqual(api.supportHint(api.parseSupport("backend smb\nusb 04f2,0e Webcam")), null)
 })
 
+console.log("\nhostile device names")
+
+// A QML Text defaults to Text.AutoText and promotes markup-looking strings to
+// rich text, which Qt renders with working <img> loads. Drive labels, vendor
+// strings and phone names come from the device, not the user, so a stick can
+// be formatted with a label that phones home the moment it is plugged in.
+const BEACON = '<img src="http://attacker.example/beacon.png">'
+
+test("strips what would make Qt treat a label as rich text", () => {
+  assert.ok(!api.plain(BEACON).includes("<"), "no opening angle bracket survives")
+  assert.ok(!api.plain(BEACON).includes(">"), "no closing angle bracket survives")
+  assert.strictEqual(api.plain("<b>Backup</b>"), "bBackup/b")
+  assert.strictEqual(api.plain(""), "")
+  assert.strictEqual(api.plain(null), "")
+})
+
+test("leaves an ordinary label untouched", () => {
+  assert.strictEqual(api.plain("Work backup"), "Work backup")
+  assert.strictEqual(api.plain("OMARCHY_202608"), "OMARCHY_202608")
+  assert.strictEqual(api.plain("Réservé (2024)"), "Réservé (2024)")
+})
+
+test("sanitises the bar label, which qs.Ui renders with a Text we cannot pin", () => {
+  const devices = api.parse(tree([disk({ model: BEACON, vendor: null, children: [part({})] })]))
+  const label = api.barLabelText(devices, "name")
+  assert.ok(!label.includes("<") && !label.includes(">"), "got: " + label)
+})
+
+test("keeps paths byte-exact, since commands are built from them", () => {
+  // Sanitising is for display only. A mount point containing an angle bracket
+  // is legal on Linux, and mangling it would unmount or open the wrong thing.
+  const devices = api.parse(tree([disk({
+    children: [part({ label: "odd", mountpoint: "/run/media/x/we<ird" })]
+  })]))
+  assert.strictEqual(devices[0].volumes[0].mountpoint, "/run/media/x/we<ird")
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

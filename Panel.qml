@@ -381,6 +381,7 @@ Panel {
             fontFamily: root.fontFamily
             iconComponent: Component {
               Text {
+                textFormat: Text.PlainText
                 text: Model.barGlyph(root.devices)
                 color: root.foreground
                 font.family: root.fontFamily
@@ -415,6 +416,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: text !== ""
             width: parent.width
             text: drives.lastError !== "" ? drives.lastError : drives.actionStatus
@@ -433,6 +435,7 @@ Panel {
             spacing: Style.space(8)
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               text: "Held by " + Model.describeBlockers(drives.blockers)
               color: root.dim
@@ -461,6 +464,7 @@ Panel {
             spacing: Style.space(8)
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               text: "Ejecting once writes finish…"
               color: root.foreground
@@ -480,6 +484,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.devices.length === 0
             width: parent.width
             text: drives.loaded ? "Nothing plugged in." : "Looking for drives…"
@@ -548,6 +553,7 @@ Panel {
               spacing: Style.space(8)
 
               Text {
+                textFormat: Text.PlainText
                 text: Model.GLYPH_ALERT
                 color: root.dim
                 font.family: root.fontFamily
@@ -560,6 +566,7 @@ Panel {
                 spacing: Style.space(1)
 
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: drives.supportHint ? drives.supportHint.text : ""
                   color: root.foreground
@@ -569,6 +576,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: drives.supportHint ? "Installs " + drives.supportHint.detail : ""
                   color: root.dim
@@ -655,6 +663,7 @@ Panel {
       spacing: Style.space(8)
 
       Text {
+        textFormat: Text.PlainText
         text: deviceRow.device ? deviceRow.device.glyph : ""
         color: root.foreground
         font.family: root.fontFamily
@@ -668,6 +677,7 @@ Panel {
         spacing: Style.space(1)
 
         Text {
+          textFormat: Text.PlainText
           visible: !deviceRow.renaming
           Layout.fillWidth: true
           text: deviceRow.device ? deviceRow.device.title : ""
@@ -699,6 +709,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: {
             if (!deviceRow.device) return ""
@@ -774,6 +785,7 @@ Panel {
       spacing: Style.space(8)
 
       Text {
+        textFormat: Text.PlainText
         text: Model.portableGlyph(portableRow.entry)
         color: root.foreground
         font.family: root.fontFamily
@@ -787,6 +799,7 @@ Panel {
         spacing: Style.space(1)
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: portableRow.entry ? portableRow.entry.name : ""
           color: portableRow.entry && portableRow.entry.mounted ? root.foreground : Qt.darker(root.foreground, 1.25)
@@ -796,6 +809,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: Model.portableMeta(portableRow.entry)
           color: root.dim
@@ -869,6 +883,7 @@ Panel {
       spacing: Style.space(8)
 
       Text {
+        textFormat: Text.PlainText
         visible: volumeRow.volume && volumeRow.volume.encrypted
         text: volumeRow.volume && volumeRow.volume.unlocked ? Model.GLYPH_UNLOCKED : Model.GLYPH_LOCKED
         color: root.dim
@@ -883,6 +898,7 @@ Panel {
         spacing: Style.space(3)
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: volumeRow.volume ? volumeRow.volume.title : ""
           color: volumeRow.volume && volumeRow.volume.mounted ? root.foreground : Qt.darker(root.foreground, 1.25)
@@ -892,6 +908,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: volumeRow.working ? "Working…" : Model.volumeMeta(volumeRow.volume)
           color: root.dim
@@ -935,6 +952,7 @@ Panel {
           spacing: Style.space(6)
 
           Text {
+            textFormat: Text.PlainText
             text: Model.GLYPH_TRASH
             color: root.dim
             font.family: root.fontFamily
@@ -942,6 +960,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             Layout.fillWidth: true
             text: Model.formatBytes(volumeRow.trashBytes) + " in trash on this drive"
             color: root.dim

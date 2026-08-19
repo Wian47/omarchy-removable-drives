@@ -38,6 +38,19 @@ var GLYPH_COPY = codepoint(0xF018F)      // md-content_copy
 
 // ------------------------------------------------------------ formatting
 
+// A QML Text defaults to Text.AutoText, which promotes anything that looks
+// like markup to rich text — and Qt's rich text fetches <img src="http://...">.
+// Drive labels, vendor strings and phone names are all chosen by the device
+// rather than by the user, so they are hostile input.
+//
+// Every Text this plugin owns is pinned to Text.PlainText. This is for the
+// strings handed to components whose Text belongs to qs.Ui — the bar button
+// and its tooltip — where the format cannot be set from outside. Display only:
+// paths and mount points must stay byte-exact for the commands built from them.
+function plain(value) {
+  return clean(value).replace(/[<>]/g, "")
+}
+
 function clean(value) {
   return String(value === undefined || value === null ? "" : value).replace(/\s+/g, " ").replace(/^ | $/g, "")
 }
@@ -464,7 +477,7 @@ function barLabelText(devices, mode) {
   if (mode === "count") return String(devices.length)
 
   var extra = devices.length > 1 ? " +" + (devices.length - 1) : ""
-  if (mode === "name") return devices[0].title + extra
+  if (mode === "name") return plain(devices[0].title) + extra
   if (mode === "free") {
     for (var d = 0; d < devices.length; d++) {
       var volumes = devices[d].volumes
