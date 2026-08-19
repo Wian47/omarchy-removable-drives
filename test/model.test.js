@@ -562,11 +562,54 @@ test("finds nothing in a listing that has no portable device", () => {
   assert.deepStrictEqual(api.parseGioMounts("nonsense"), [])
 })
 
-test("describes a phone's state for the row", () => {
-  assert.strictEqual(api.portableMeta({ kind: "phone", mounted: true }), "Phone · mounted")
-  assert.strictEqual(api.portableMeta({ kind: "camera", mounted: true }), "Camera · mounted")
-  assert.strictEqual(api.portableMeta({ kind: "phone", mounted: false }), "Not mounted")
+test("describes what the device actually gives you", () => {
+  // PTP only ever exposes the camera roll, so saying "Files" would be a lie.
+  assert.strictEqual(api.portableMeta({ access: "Photos", mounted: true }), "Photos · mounted")
+  assert.strictEqual(api.portableMeta({ access: "Files", mounted: true }), "Files · mounted")
+  assert.strictEqual(api.portableMeta({ access: "Photos", mounted: false }), "Photos · not mounted")
   assert.strictEqual(api.portableMeta(null), "")
+})
+
+// Captured verbatim from `gio mount -li` with an iPhone 05ac:12a8 attached.
+// An iPhone speaks PTP, so gvfs files it under gphoto2 with camera icons —
+// this is the case that made the naive "gphoto2 means camera" rule wrong.
+const GIO_IPHONE = `Volume(0): iPhone
+    Type: GProxyVolume (GProxyVolumeMonitorGPhoto2)
+    ids:
+     unix-device: '/dev/bus/usb/005/002'
+    activation_root=gphoto2://Apple_Inc._iPhone_0000814000086450119B801C/
+    themed icons:  [camera-photo]
+    symbolic themed icons:  [camera-photo-symbolic]  [camera-symbolic]
+    can_mount=1
+    should_automount=1
+    Mount(0): iPhone -> gphoto2://Apple_Inc._iPhone_0000814000086450119B801C/
+      Type: GProxyShadowMount (GProxyVolumeMonitorGPhoto2)
+      is_shadowed=0
+  Mount(1): iPhone -> gphoto2://Apple_Inc._iPhone_0000814000086450119B801C/
+    Type: GDaemonMount`
+
+test("reads a real iPhone the way gvfs actually reports it", () => {
+  const found = api.parseGioMounts(GIO_IPHONE)
+  assert.strictEqual(found.length, 1, "the shadow mount and daemon mount are one device")
+  assert.strictEqual(found[0].name, "iPhone")
+  assert.strictEqual(found[0].mounted, true)
+  assert.strictEqual(found[0].uri, "gphoto2://Apple_Inc._iPhone_0000814000086450119B801C/")
+})
+
+test("an iPhone is a phone, even though gvfs calls it a camera", () => {
+  const iphone = api.parseGioMounts(GIO_IPHONE)[0]
+  assert.strictEqual(iphone.kind, "phone", "the glyph should not be a camera")
+  assert.strictEqual(iphone.access, "Photos", "but PTP still only reaches the camera roll")
+  assert.strictEqual(api.portableGlyph(iphone), api.GLYPH_PHONE)
+  assert.strictEqual(api.portableMeta(iphone), "Photos · mounted")
+})
+
+test("an actual camera is still a camera", () => {
+  const canon = api.parseGioMounts(`Volume(0): Canon EOS
+    Type: GProxyVolume (GProxyVolumeMonitorGPhoto2)
+    activation_root=gphoto2://Canon_EOS_1234/`)[0]
+  assert.strictEqual(canon.kind, "camera")
+  assert.strictEqual(canon.access, "Photos")
 })
 
 test("gives phones their own navigation rows after the drives", () => {

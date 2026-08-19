@@ -660,6 +660,9 @@ Item {
         root.notify("Removable drives", root.lastError, Model.GLYPH_ALERT, "normal")
       }
       root.refresh()
+      // A phone mount changes gvfs state, which lsblk knows nothing about.
+      if (action === "mount-portable" || action === "unmount-portable") root.refreshPortables()
+      if (root.watchClosely) root.probeTrash()
     }
   }
 
@@ -744,7 +747,16 @@ Item {
     onTriggered: {
       root.refresh()
       root.refreshPortables()
+      // gvfs auto-mounts a phone a beat after udev announces it, so the
+      // first listing catches it unmounted. Look again once it has settled.
+      settleTimer.restart()
     }
+  }
+
+  Timer {
+    id: settleTimer
+    interval: 2500
+    onTriggered: root.refreshPortables()
   }
 
   Timer {
@@ -769,7 +781,10 @@ Item {
     interval: Math.max(2, root.intSetting("refreshIntervalSec", 8, 2, 300)) * 1000
     running: root.watchClosely
     repeat: true
-    onTriggered: root.refresh()
+    onTriggered: {
+      root.refresh()
+      root.refreshPortables()
+    }
   }
 
   // Backstop for a machine where udevadm is unavailable or its stream dies

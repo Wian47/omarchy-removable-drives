@@ -591,6 +591,11 @@ function parseStore(raw) {
 
 var PORTABLE_URI = /^(mtp|gphoto2|afc):\/\//
 
+// An iPhone speaks PTP, so gvfs files it under the gphoto2 backend and its
+// icon set says "camera". It is still a phone to the person holding it, so the
+// name decides what it looks like and the backend decides what it can reach.
+var PHONE_NAME = /iphone|ipad|android|phone|pixel|galaxy|oneplus|xiaomi|nexus|redmi/i
+
 function isPortableType(typeLine) {
   return /MTP|GPhoto2|Afc/i.test(String(typeLine || ""))
 }
@@ -604,11 +609,17 @@ function parseGioMounts(raw) {
     if (!current) return
     var isPortable = isPortableType(current.type) || PORTABLE_URI.test(current.uri)
     if (isPortable && clean(current.name) !== "") {
+      var name = clean(current.name)
+      var scheme = (clean(current.uri).match(/^([a-z0-9]+):\/\//) || ["", ""])[1]
+      var looksLikeCamera = scheme === "gphoto2" || /GPhoto2/i.test(current.type)
       out.push({
-        name: clean(current.name),
+        name: name,
         uri: clean(current.uri),
         mounted: current.mounted === true,
-        kind: /gphoto2/i.test(current.uri) || /GPhoto2/i.test(current.type) ? "camera" : "phone"
+        scheme: scheme,
+        // PTP only ever exposes the camera roll; MTP and AFC reach further.
+        access: looksLikeCamera ? "Photos" : "Files",
+        kind: PHONE_NAME.test(name) ? "phone" : (looksLikeCamera ? "camera" : "phone")
       })
     }
     current = null
@@ -666,7 +677,11 @@ function parseGioMounts(raw) {
     if (seen) {
       if (seen.uri === "" && entry.uri !== "") seen.uri = entry.uri
       if (entry.mounted) seen.mounted = true
-      if (entry.kind === "camera") seen.kind = "camera"
+      if (seen.scheme === "" && entry.scheme !== "") {
+        seen.scheme = entry.scheme
+        seen.access = entry.access
+      }
+      if (entry.kind === "camera" && !PHONE_NAME.test(seen.name)) seen.kind = "camera"
       continue
     }
     byName[entry.name] = entry
@@ -689,8 +704,9 @@ function portableGlyph(entry) {
 
 function portableMeta(entry) {
   if (!entry) return ""
-  if (!entry.mounted) return "Not mounted"
-  return entry.kind === "camera" ? "Camera · mounted" : "Phone · mounted"
+  var access = entry.access || "Files"
+  if (!entry.mounted) return access + " · not mounted"
+  return access + " · mounted"
 }
 
 // -------------------------------------------------- backend availability
