@@ -3,6 +3,8 @@
 USB sticks, SD cards, phones, and external drives in the Omarchy bar — mount,
 open, and safely eject them without a terminal.
 
+![The panel, showing a USB drive and its two volumes](preview.png)
+
 The icon only exists while a drive does. Plug one in and it appears; pull it out
 and the bar goes back to what it was.
 
@@ -114,6 +116,41 @@ empty. The device must be unlocked and have trusted this computer.
 Browsing uses `gio open` rather than `xdg-open`, because nothing registers an
 `x-scheme-handler` for `gphoto2://`, `afc://`, or `mtp://` — `xdg-open` exits
 successfully and does nothing at all with them.
+
+### Removing it
+
+```bash
+omarchy plugin disable wian47.removable-drives   # keep it installed, off the bar
+omarchy plugin remove wian47.removable-drives    # remove it entirely
+```
+
+Removing the plugin leaves nothing behind except its own settings file, which
+you can delete if you want the nicknames gone too:
+
+```bash
+rm ~/.local/state/omarchy/removable-drives.json
+```
+
+It never writes to `shell.json`, your Hyprland config, or anything else of
+yours — the bar entry is managed by Omarchy's own plugin commands, and the
+nicknames live in the file above.
+
+## Requirements
+
+Everything below `udisks2` ships with Omarchy; the widget calls these and
+nothing else.
+
+| Used for | Commands |
+|---|---|
+| Listing and watching drives | `lsblk`, `udevadm`, `stdbuf` |
+| Mounting, ejecting, unlocking | `udisksctl` (udisks2) |
+| Phones and cameras | `gio` (gvfs) |
+| Write activity | `/sys/block/<dev>/stat` via `head` |
+| Busy mounts, trash, clipboard | `fuser`, `ps`, `du`, `rm`, `wl-copy` |
+| Notifications and terminals | `omarchy-notification-send`, `omarchy-launch-floating-terminal-with-presentation`, `omarchy-install-app` |
+
+Nothing runs as root, and the only recursive delete is emptying a drive's own
+trash, guarded as described below.
 
 ## Using it
 
