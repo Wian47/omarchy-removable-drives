@@ -654,6 +654,52 @@ Mount(0): Pixel 7 -> mtp://Google_Pixel_7_1A2B3C/`
   assert.strictEqual(found[0].uri, "mtp://Google_Pixel_7_1A2B3C/")
 })
 
+// Captured verbatim from a Samsung Galaxy over MTP. Note the last line: gvfs
+// names the daemon mount after the backend ("mtp"), not after the device, so
+// matching mounts to volumes by name alone would miss it.
+const GIO_ANDROID = `Volume(0): SAMSUNG Android
+  Type: GProxyVolume (GProxyVolumeMonitorMTP)
+  ids:
+   unix-device: '/dev/bus/usb/005/006'
+  activation_root=mtp://SAMSUNG_SAMSUNG_Android_R5GL62TXRAT/
+  themed icons:  [multimedia-player]
+  can_mount=1
+  should_automount=1
+  Mount(0): SAMSUNG Android -> mtp://SAMSUNG_SAMSUNG_Android_R5GL62TXRAT/
+    Type: GProxyShadowMount (GProxyVolumeMonitorMTP)
+    is_shadowed=0
+Mount(1): mtp -> mtp://SAMSUNG_SAMSUNG_Android_R5GL62TXRAT/
+  Type: GDaemonMount`
+
+test("reads an Android phone over MTP", () => {
+  const found = api.parseGioMounts(GIO_ANDROID)
+  assert.strictEqual(found.length, 1, "the shadow mount and daemon mount are one device")
+  assert.strictEqual(found[0].name, "SAMSUNG Android")
+  assert.strictEqual(found[0].uri, "mtp://SAMSUNG_SAMSUNG_Android_R5GL62TXRAT/")
+  assert.strictEqual(found[0].mounted, true)
+  assert.strictEqual(found[0].access, "Files", "MTP reaches more than the camera roll")
+  assert.strictEqual(found[0].kind, "phone")
+})
+
+test("a mount named after its backend still counts, matched by URI", () => {
+  // Only the top-level "Mount(1): mtp -> ..." says this is mounted, and its
+  // name is the backend rather than the device.
+  const onlyDaemonMount = GIO_ANDROID.split("\n")
+    .filter(l => !/Mount\(0\)|GProxyShadowMount|is_shadowed/.test(l))
+    .join("\n")
+  const found = api.parseGioMounts(onlyDaemonMount)
+  assert.strictEqual(found.length, 1)
+  assert.strictEqual(found[0].mounted, true, "same URI means the same device")
+})
+
+test("a mount for a different device does not mark this one mounted", () => {
+  const other = `Volume(0): SAMSUNG Android
+  Type: GProxyVolume (GProxyVolumeMonitorMTP)
+  activation_root=mtp://SAMSUNG_SAMSUNG_Android_R5GL62TXRAT/
+Mount(1): mtp -> mtp://SOME_OTHER_PHONE/`
+  assert.strictEqual(api.parseGioMounts(other)[0].mounted, false)
+})
+
 test("an actual camera is still a camera", () => {
   const canon = api.parseGioMounts(`Volume(0): Canon EOS
     Type: GProxyVolume (GProxyVolumeMonitorGPhoto2)

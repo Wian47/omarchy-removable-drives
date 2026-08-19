@@ -676,11 +676,22 @@ function parseGioMounts(raw) {
   }
   flush()
 
-  // Mounts listed outside any block still prove their device is mounted.
+  // Mounts listed outside any block still prove their device is mounted —
+  // matched by name, or by URI, because gvfs names an MTP daemon mount after
+  // the backend ("Mount(1): mtp -> mtp://SAMSUNG_.../") rather than after the
+  // device it belongs to.
   for (var m = 0; m < out.length; m++) {
     if (mountsByName[out[m].name] !== undefined) {
       out[m].mounted = true
       if (out[m].uri === "") out[m].uri = mountsByName[out[m].name]
+      continue
+    }
+    if (out[m].uri === "") continue
+    for (var mountName in mountsByName) {
+      if (mountsByName[mountName] === out[m].uri) {
+        out[m].mounted = true
+        break
+      }
     }
   }
 
