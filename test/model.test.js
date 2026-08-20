@@ -846,5 +846,52 @@ test("keeps paths byte-exact, since commands are built from them", () => {
   assert.strictEqual(devices[0].volumes[0].mountpoint, "/run/media/x/we<ird")
 })
 
+// Reported by @ryanrhughes: clean() collapsed runs of whitespace, and paths
+// went through it. A label with two spaces therefore produced a mount point
+// the plugin believed in but the filesystem did not — and because the guard
+// validated the same normalised string it deleted, it approved recursively
+// removing a path belonging to something else.
+const DOUBLE_SPACE_MOUNT = "/run/media/wian47/MY  BACKUP"
+
+test("a mount point with repeated whitespace is not normalised", () => {
+  const devices = api.parse(tree([disk({
+    children: [part({ label: "MY  BACKUP", mountpoint: DOUBLE_SPACE_MOUNT })]
+  })]))
+  assert.strictEqual(devices[0].volumes[0].mountpoint, DOUBLE_SPACE_MOUNT)
+})
+
+test("preserves leading, trailing and tab whitespace in a path", () => {
+  for (const mount of ["/run/media/x/trailing ", "/run/media/x/tab\there", "/run/media/x/  two"]) {
+    const devices = api.parse(tree([disk({ children: [part({ mountpoint: mount })] })]))
+    assert.strictEqual(devices[0].volumes[0].mountpoint, mount, JSON.stringify(mount))
+  }
+})
+
+test("the trash guard refuses a normalised near-miss of a real mount point", () => {
+  const mounts = [DOUBLE_SPACE_MOUNT]
+  assert.strictEqual(api.isSafeTrashPath(DOUBLE_SPACE_MOUNT + "/.Trash-1000", mounts, "1000"), true,
+    "the real path is still accepted")
+  assert.strictEqual(api.isSafeTrashPath("/run/media/wian47/MY BACKUP/.Trash-1000", mounts, "1000"), false,
+    "one space instead of two is a different drive and must be refused")
+})
+
+test("trash candidates are built from the exact mount point", () => {
+  const [first, second] = api.trashCandidates(DOUBLE_SPACE_MOUNT, "1000")
+  assert.strictEqual(first, DOUBLE_SPACE_MOUNT + "/.Trash-1000")
+  assert.strictEqual(second, DOUBLE_SPACE_MOUNT + "/.Trash/1000")
+})
+
+test("du output keys keep whitespace, including a trailing space", () => {
+  const raw = "4096\t/run/media/x/MY  BACKUP/.Trash-1000\n512\t/run/media/x/trailing /.Trash-1000\n"
+  const sizes = api.parseSizes(raw)
+  assert.strictEqual(sizes["/run/media/x/MY  BACKUP/.Trash-1000"], 4096)
+  assert.strictEqual(sizes["/run/media/x/trailing /.Trash-1000"], 512)
+})
+
+test("a serial with odd spacing still keys the same drive every time", () => {
+  const devices = api.parse(tree([disk({ serial: "AB  12", children: [part({})] })]))
+  assert.strictEqual(api.driveKey(devices[0]), "serial:AB  12")
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

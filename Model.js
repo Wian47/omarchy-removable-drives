@@ -63,6 +63,16 @@ function clean(value) {
   return String(value === undefined || value === null ? "" : value).replace(/\s+/g, " ").replace(/^ | $/g, "")
 }
 
+// Anything compared against the filesystem or handed to a command has to
+// survive byte for byte. clean() collapses runs of whitespace, which silently
+// turns a mount point containing two spaces into a different path — and the
+// trash guard then approved it, because it was validating the same mangled
+// string it went on to delete. Paths, mount points and identifiers use this;
+// only text meant for a human goes through clean().
+function exact(value) {
+  return String(value === undefined || value === null ? "" : value)
+}
+
 // 1024-based with short suffixes, matching what `lsblk` prints in its human
 // column so the panel never disagrees with the terminal the user checks it
 // against.
@@ -117,11 +127,11 @@ function isCandidateDisk(node) {
 
 function holdsSystemMount(node) {
   if (!node) return false
-  var mp = clean(node.mountpoint)
+  var mp = exact(node.mountpoint)
   if (mp !== "" && SYSTEM_MOUNTS.indexOf(mp) !== -1) return true
   var mounts = node.mountpoints || []
   for (var m = 0; m < mounts.length; m++) {
-    if (mounts[m] && SYSTEM_MOUNTS.indexOf(clean(mounts[m])) !== -1) return true
+    if (mounts[m] && SYSTEM_MOUNTS.indexOf(exact(mounts[m])) !== -1) return true
   }
   var kids = node.children || []
   for (var i = 0; i < kids.length; i++) {
@@ -165,14 +175,14 @@ function buildVolume(part, index) {
   var partFs = clean(part.fstype)
   var encrypted = partFs === "crypto_LUKS"
   var fstype = clean(fsNode.fstype)
-  var mountpoint = clean(fsNode.mountpoint)
+  var mountpoint = exact(fsNode.mountpoint)
   var label = clean(fsNode.label) || clean(part.label) || clean(part.partlabel)
 
   return {
-    path: clean(part.path),
-    fsPath: clean(fsNode.path),
-    name: clean(part.name),
-    uuid: clean(fsNode.uuid) || clean(part.uuid),
+    path: exact(part.path),
+    fsPath: exact(fsNode.path),
+    name: exact(part.name),
+    uuid: exact(fsNode.uuid) || exact(part.uuid),
     index: index,
     label: label,
     title: label !== "" ? label : clean(part.name),
@@ -218,9 +228,9 @@ function buildDevice(node) {
   }
 
   return {
-    path: clean(node.path),
-    name: clean(node.name),
-    serial: clean(node.serial),
+    path: exact(node.path),
+    name: exact(node.name),
+    serial: exact(node.serial),
     title: deviceTitle(node),
     nickname: "",
     key: "",
@@ -505,7 +515,7 @@ function barLabelText(devices, mode) {
 // freedesktop spec are checked.
 
 function trashCandidates(mountpoint, uid) {
-  var mount = clean(mountpoint)
+  var mount = exact(mountpoint)
   if (mount === "" || uid === undefined || uid === null) return []
   return [mount + "/.Trash-" + uid, mount + "/.Trash/" + uid]
 }
@@ -515,7 +525,7 @@ function trashCandidates(mountpoint, uid) {
 // never by pattern-matching, so a crafted label or a stale path cannot widen
 // what gets removed.
 function isSafeTrashPath(path, mountpoints, uid) {
-  var target = clean(path)
+  var target = exact(path)
   if (target === "") return false
   for (var i = 0; i < (mountpoints || []).length; i++) {
     var candidates = trashCandidates(mountpoints[i], uid)
@@ -532,8 +542,8 @@ function parseSizes(raw) {
   var out = {}
   var lines = String(raw || "").split("\n")
   for (var i = 0; i < lines.length; i++) {
-    var match = lines[i].match(/^(\d+)\s+(.+)$/)
-    if (match) out[match[2].replace(/\s+$/, "")] = Number(match[1])
+    var match = lines[i].match(/^(\d+)[ \t]+(.+?)\r?$/)
+    if (match) out[match[2]] = Number(match[1])
   }
   return out
 }
@@ -546,10 +556,10 @@ function parseSizes(raw) {
 // distinguishes two different models rather than two identical sticks.
 function driveKey(device) {
   if (!device) return ""
-  var serial = clean(device.serial)
+  var serial = exact(device.serial)
   if (serial !== "") return "serial:" + serial
   for (var i = 0; i < device.volumes.length; i++) {
-    var uuid = clean(device.volumes[i].uuid)
+    var uuid = exact(device.volumes[i].uuid)
     if (uuid !== "") return "uuid:" + uuid
   }
   return "model:" + clean(device.title) + ":" + device.sizeBytes
