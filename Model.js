@@ -217,7 +217,7 @@ function buildDevice(node) {
 
   if (parts.length === 0) {
     // A stick formatted without a partition table: the disk *is* the volume.
-    if (clean(node.fstype) !== "" || clean(node.mountpoint) !== "") volumes.push(buildVolume(node, 1))
+    if (clean(node.fstype) !== "" || exact(node.mountpoint) !== "") volumes.push(buildVolume(node, 1))
   } else {
     for (var p = 0; p < parts.length; p++) volumes.push(buildVolume(parts[p], p + 1))
   }
@@ -642,11 +642,14 @@ function parseGioMounts(raw) {
     var isPortable = isPortableType(current.type) || PORTABLE_URI.test(current.uri)
     if (isPortable && clean(current.name) !== "") {
       var name = clean(current.name)
-      var scheme = (clean(current.uri).match(/^([a-z0-9]+):\/\//) || ["", ""])[1]
+      // The URI is an argument to `gio mount` and `gio open`, so it is a path
+      // by another name and gets the same byte-exact treatment.
+      var uri = exact(current.uri)
+      var scheme = (uri.match(/^([a-z0-9]+):\/\//) || ["", ""])[1]
       var looksLikeCamera = scheme === "gphoto2" || /GPhoto2/i.test(current.type)
       out.push({
         name: name,
-        uri: clean(current.uri),
+        uri: uri,
         mounted: current.mounted === true,
         scheme: scheme,
         // PTP only ever exposes the camera roll; MTP and AFC reach further.

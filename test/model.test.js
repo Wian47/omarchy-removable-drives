@@ -700,6 +700,16 @@ Mount(1): mtp -> mtp://SOME_OTHER_PHONE/`
   assert.strictEqual(api.parseGioMounts(other)[0].mounted, false)
 })
 
+test("a device URI reaches gio byte-exact, like any other path", () => {
+  // The URI is an argument to `gio mount` and `gio open`, so normalising it
+  // would address a different device — the same mistake as the mount points.
+  const spaced = `Volume(0): Odd Phone
+  Type: GProxyVolume (GProxyVolumeMonitorMTP)
+  activation_root=mtp://TWO__UNDERSCORES/`
+  const found = api.parseGioMounts(spaced)
+  assert.strictEqual(found[0].uri, "mtp://TWO__UNDERSCORES/")
+})
+
 test("an actual camera is still a camera", () => {
   const canon = api.parseGioMounts(`Volume(0): Canon EOS
     Type: GProxyVolume (GProxyVolumeMonitorGPhoto2)
