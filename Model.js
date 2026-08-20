@@ -35,6 +35,10 @@ var GLYPH_TRASH = codepoint(0xF0A7A)     // md-trash_can_outline
 var GLYPH_PENCIL = codepoint(0xF03EB)    // md-pencil
 var GLYPH_TERMINAL = codepoint(0xF018D)  // md-console
 var GLYPH_COPY = codepoint(0xF018F)      // md-content_copy
+var GLYPH_TAG = codepoint(0xF04F9)       // md-tag
+var GLYPH_STETHOSCOPE = codepoint(0xF04D9) // md-stethoscope
+var GLYPH_WRENCH = codepoint(0xF05B7)    // md-wrench
+var GLYPH_HEALTHY = codepoint(0xF05E0)   // md-check_circle
 
 // ------------------------------------------------------------ formatting
 
@@ -327,8 +331,13 @@ function navRows(devices, portables) {
 
 // udisksctl reports failures as a full D-Bus error name followed by the part
 // a person can act on ("target is busy"). Keep the readable tail.
+//
+// busctl, which is what carries the calls udisksctl has no verb for, drops the
+// error name and prefixes the message with "Call failed:" instead — so strip
+// that too, and the remainder is already the sentence udisks meant to say.
 function formatError(text) {
   var t = clean(text)
+  t = t.replace(/^Call failed:\s*/, "")
   var match = t.match(/Error\.[A-Za-z]+:\s*(.*)$/)
   if (match) t = clean(match[1])
   if (t === "") return ""
@@ -842,4 +851,232 @@ function supportHint(support) {
     }
   }
   return null
+}
+
+// ------------------------------------------------- labels and integrity
+//
+// Two things udisks exposes on org.freedesktop.UDisks2.Filesystem that
+// `udisksctl` has no verb for: renaming a filesystem, and running its fsck.
+// Both are `modify-device` in the udisks policy, which is `allow_active: yes`
+// for a removable drive — so the logged-in session may do them without a
+// prompt, exactly like mounting, and nothing here runs as root either.
+//
+// Neither is offered against a mounted filesystem. Check and Repair refuse
+// outright. SetLabel usually succeeds, but the mount point was built from the
+// old label and does not follow it, leaving a drive mounted at
+// /run/media/<user>/OLDNAME while calling itself something else — so the
+// panel unmounts first and mounts back afterwards for both.
+
+// Every filesystem hands its label to a different tool — fatlabel, exfatlabel,
+// e2label, ntfslabel — and each has its own ceiling. These are libblockdev's
+// numbers, the same ones udisks refuses on, so the field can say "two
+// characters too long" while it is still open rather than after a round trip
+// that unmounted the drive for a write that was never going to land.
+var LABEL_LIMITS = {
+  vfat: 11, exfat: 11, ext2: 16, ext3: 16, ext4: 16, xfs: 12,
+  ntfs: 128, btrfs: 256, f2fs: 512, nilfs2: 80, udf: 126
+}
+
+// The DOS reserved characters, which fatlabel rejects one at a time.
+var VFAT_FORBIDDEN = "\"*/:<>?\\|"
+
+function labelLimit(fstype) {
+  var limit = LABEL_LIMITS[clean(fstype)]
+  return limit === undefined ? 0 : limit
+}
+
+// Renaming needs a filesystem that is readable and whose tool we know a limit
+// for. A LUKS partition still locked has no filesystem to name yet.
+function canRelabel(volume) {
+  if (!volume) return false
+  if (volume.encrypted && !volume.unlocked) return false
+  return labelLimit(volume.fstype) > 0
+}
+
+// The label is the one string in this file a person typed rather than a device
+// supplied, but it still travels to a filesystem tool, so it is trimmed at the
+// ends and otherwise left alone — interior spacing is the user's business, and
+// clean() would quietly rewrite "MY  STICK" into a different name than the one
+// on screen.
+function normaliseLabel(label) {
+  return String(label === undefined || label === null ? "" : label).replace(/^\s+|\s+$/g, "")
+}
+
+function validateLabel(volume, label) {
+  if (!volume) return { ok: false, message: "No volume selected", label: "" }
+  var fstype = clean(volume.fstype)
+  var limit = labelLimit(fstype)
+  var fs = formatFsType(fstype)
+  if (limit === 0) {
+    return { ok: false, message: (fs !== "" ? fs : "This") + " labels cannot be changed from here", label: "" }
+  }
+
+  var value = normaliseLabel(label)
+  if (value.length > limit) {
+    return {
+      ok: false,
+      label: value,
+      message: fs + " labels are at most " + limit + " characters — that is " +
+               (value.length - limit) + " too many"
+    }
+  }
+  if (fstype === "vfat") {
+    for (var i = 0; i < value.length; i++) {
+      var ch = value.charAt(i)
+      if (VFAT_FORBIDDEN.indexOf(ch) !== -1) {
+        return { ok: false, label: value, message: fs + " labels cannot contain " + ch }
+      }
+    }
+  }
+  // An empty label is a real answer: it clears the name rather than storing a
+  // blank one, which is how the drive shipped before anyone named it.
+  return { ok: true, message: "", label: value }
+}
+
+// How much room is left, for the counter beside the field. Negative once the
+// name is too long, which is what turns the counter urgent.
+function labelRemaining(volume, label) {
+  var limit = volume ? labelLimit(volume.fstype) : 0
+  if (limit === 0) return 0
+  return limit - normaliseLabel(label).length
+}
+
+// udisks answers "can you fsck this?" itself, and when the answer is no it
+// names the tool it went looking for rather than just refusing. That turns a
+// missing button into a sentence someone can act on, the same way the gvfs
+// backend check does for phones.
+//
+// Lines read `CanCheck vfat (bs) true ""` or `CanRepair ntfs (bs) false
+// "ntfsfix"`. A filesystem udisks will not fsck at all answers with an error
+// rather than a value, and the probe echoes the bare `CanCheck nilfs2` back.
+function parseFsCapabilities(raw) {
+  var caps = { check: {}, repair: {} }
+  var lines = String(raw || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var match = clean(lines[i]).match(/^Can(Check|Repair)\s+(\S+)(?:\s+\(bs\)\s+(true|false)\s+"([^"]*)")?$/)
+    if (!match) continue
+    var bucket = match[1] === "Check" ? caps.check : caps.repair
+    bucket[match[2]] = match[3] === undefined
+      ? { supported: false, available: false, missing: "" }
+      : { supported: true, available: match[3] === "true", missing: match[4] || "" }
+  }
+  return caps
+}
+
+function fsCapability(caps, kind, fstype) {
+  var bucket = caps && caps[kind] ? caps[kind] : {}
+  var entry = bucket[clean(fstype)]
+  return entry === undefined ? null : entry
+}
+
+// Whether the volume is mounted is deliberately not part of this: the panel
+// unmounts it first rather than greying the button out and leaving the user to
+// work out which of the two buttons unblocks the other.
+function canCheck(caps, volume) {
+  if (!volume) return false
+  if (volume.encrypted && !volume.unlocked) return false
+  var entry = fsCapability(caps, "check", volume.fstype)
+  return entry !== null && entry.available === true
+}
+
+function canRepair(caps, volume) {
+  if (!volume) return false
+  if (volume.encrypted && !volume.unlocked) return false
+  var entry = fsCapability(caps, "repair", volume.fstype)
+  return entry !== null && entry.available === true
+}
+
+// Which package carries each helper udisks names when it cannot find one.
+var TOOL_PACKAGES = {
+  "ntfsfix": "ntfs-3g",
+  "fsck.ntfs": "ntfs-3g",
+  "ntfslabel": "ntfs-3g",
+  "fsck.exfat": "exfatprogs",
+  "exfatlabel": "exfatprogs",
+  "xfs_repair": "xfsprogs",
+  "xfs_db": "xfsprogs",
+  "xfs_admin": "xfsprogs",
+  "fsck.f2fs": "f2fs-tools",
+  "f2fslabel": "f2fs-tools",
+  "fsck.vfat": "dosfstools",
+  "fatlabel": "dosfstools",
+  "e2fsck": "e2fsprogs",
+  "e2label": "e2fsprogs",
+  "btrfs": "btrfs-progs",
+  "btrfsck": "btrfs-progs",
+  "fsck.nilfs2": "nilfs-utils",
+  "fsck.udf": "udftools"
+}
+
+function toolPackage(tool) {
+  return TOOL_PACKAGES[clean(tool)] || ""
+}
+
+// Said in place of the button when the check cannot be offered. A check udisks
+// would run if one package were present is worth naming; a filesystem it never
+// checks is worth saying so about rather than leaving a silent gap where a
+// button was on the row above.
+function checkHint(caps, volume) {
+  if (!volume) return null
+  if (volume.encrypted && !volume.unlocked) return null
+  if (clean(volume.fstype) === "") return null
+  var entry = fsCapability(caps, "check", volume.fstype)
+  if (entry === null || entry.available) return null
+
+  var fs = formatFsType(volume.fstype)
+  if (!entry.supported || entry.missing === "") {
+    return { text: "udisks cannot check " + fs, detail: "", packages: "", label: "" }
+  }
+  var pkg = toolPackage(entry.missing)
+  return {
+    text: "Checking " + fs + " needs " + entry.missing,
+    detail: pkg !== "" ? pkg : entry.missing,
+    packages: pkg,
+    label: fs + " repair tools"
+  }
+}
+
+// The probe costs a D-Bus round trip per filesystem, so ask about the types
+// actually attached rather than everything udisks lists. Sorted, because the
+// result doubles as the signature that decides whether to probe again at all.
+function fsTypesPresent(devices) {
+  var seen = {}
+  var out = []
+  for (var d = 0; d < (devices || []).length; d++) {
+    var volumes = devices[d].volumes || []
+    for (var v = 0; v < volumes.length; v++) {
+      var fs = clean(volumes[v].fstype)
+      if (fs === "" || fs === "crypto_LUKS") continue
+      if (seen[fs] === true) continue
+      seen[fs] = true
+      out.push(fs)
+    }
+  }
+  out.sort()
+  return out
+}
+
+// Check exits 0 whether or not it liked what it found — an unhealthy
+// filesystem is a result, not a failure — so the verdict is read off stdout
+// rather than off the exit code, and an unreadable answer stays null rather
+// than defaulting to "healthy".
+function parseFsVerdict(raw) {
+  var t = clean(raw)
+  if (/^b\s+true$/.test(t)) return true
+  if (/^b\s+false$/.test(t)) return false
+  return null
+}
+
+function describeCheck(volume, consistent) {
+  var name = volume ? volume.title : "the filesystem"
+  if (consistent === true) return "No errors found on " + name
+  if (consistent === false) return "Errors found on " + name
+  return "Could not tell whether " + name + " is healthy"
+}
+
+function describeRepair(volume, repaired) {
+  var name = volume ? volume.title : "the filesystem"
+  if (repaired === true) return "Repaired " + name
+  if (repaired === false) return name + " could not be fully repaired"
+  return "Could not tell whether " + name + " was repaired"
 }

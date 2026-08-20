@@ -62,6 +62,19 @@ Item {
   property var trashSizes: ({})
   property string uid: ""
 
+  // What udisks says it can fsck, asked about the filesystem types actually
+  // attached. The signature is the sorted list it was last asked about, so a
+  // drive going in or out only costs a probe when it brings a new type.
+  property var fsCapabilities: ({ check: {}, repair: {} })
+  property string _capsSignature: ""
+
+  // The filesystem the last check was about, and what it said: true healthy,
+  // false damaged, null unreadable. A repair is only ever offered for this
+  // exact path and only while the answer was false, so it cannot be started
+  // against a volume nobody has looked at.
+  property string checkedFsPath: ""
+  property var checkVerdict: null
+
   readonly property bool busy: actionProcess.running
   readonly property int deviceCount: devices.length
   readonly property int mountedCount: {
@@ -150,6 +163,15 @@ Item {
     lsblkProcess.running = true
   }
 
+  // What the rescan button and `r` do. Unlike refresh(), it also forgets what
+  // udisks last said it could fsck — so installing a missing tool and pressing
+  // rescan is enough to make the check button appear, without a shell restart.
+  function rescan() {
+    _capsSignature = ""
+    refresh()
+    refreshPortables()
+  }
+
   function applySnapshot(raw) {
     var next = []
     try {
@@ -174,6 +196,7 @@ Item {
     _seenFirstSnapshot = true
 
     if (watchClosely) probeTrash()
+    probeCapabilities()
 
     // A mount requested with "open after mounting" only knows where the
     // filesystem landed once the next snapshot comes back with a mount point.
@@ -292,6 +315,8 @@ Item {
     actionStatus = ""
     blockers = []
     blockedFsPath = ""
+    checkedFsPath = ""
+    checkVerdict = null
     _stdout = ""
     _stderr = ""
     _successMessage = successMessage
@@ -513,6 +538,226 @@ Item {
               "Emptied trash on " + volume.title)
   }
 
+  // ------------------------------------------- labels and integrity
+
+  // Renaming a filesystem and running its fsck are both on
+  // org.freedesktop.UDisks2.Filesystem, and `udisksctl` has a verb for
+  // neither — so these three go over the bus directly. Both are
+  // `modify-device` in the udisks policy, which is `allow_active: yes` for a
+  // removable drive: the same no-password path mounting already takes, and
+  // still nothing running as root.
+
+  // One script for all three, because they share a shape: resolve the udisks
+  // object for the device, take the filesystem offline, do the one thing, put
+  // it back. The mount is restored whether or not the middle step worked — a
+  // rename udisks refused should not also leave the drive unmounted.
+  //
+  // The object path is asked for rather than built. udisks escapes the kernel
+  // name into it, so an unlocked LUKS volume at /dev/mapper/backup is
+  // .../block_devices/dm_2d3, and a plugin guessing at that encoding would
+  // work on every stick and fail on every encrypted one.
+  //
+  // Everything variable arrives as a positional argument. The label is the one
+  // string here a person typed rather than a device supplied, and passing it
+  // as "$4" means it never becomes part of the script text.
+  readonly property string fsScript: [
+    'set -u',
+    'dev=$1',
+    'remount=$2',
+    'method=$3',
+    'label=${4-}',
+    'raw=$(busctl call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager' +
+      ' org.freedesktop.UDisks2.Manager ResolveDevice "a{sv}a{sv}" 1 path s "$dev" 0) || exit 1',
+    // The path is the last field and arrives wrapped in quotes. Trimming from
+    // the first slash and then dropping one trailing character lifts it out
+    // without naming a quote anywhere — a literal one would have to survive
+    // both QML's escaping and bash's, and only looks right in one of them.
+    'obj=/${raw#*/}',
+    'obj=${obj%?}',
+    'case "$obj" in',
+    '  /org/freedesktop/UDisks2/block_devices/*) ;;',
+    '  *) echo "udisks does not recognise $dev" >&2; exit 1 ;;',
+    'esac',
+    'if [ "$remount" = 1 ]; then udisksctl unmount --no-user-interaction -b "$dev" >/dev/null || exit 1; fi',
+    'rc=0',
+    'if [ "$method" = SetLabel ]; then',
+    '  busctl --timeout=120 call org.freedesktop.UDisks2 "$obj"' +
+      ' org.freedesktop.UDisks2.Filesystem SetLabel "sa{sv}" "$label" 0 || rc=$?',
+    'else',
+    // An fsck has no useful upper bound — a big NTFS volume can take an hour —
+    // so the bus timeout is a day rather than busctl's default 25 seconds,
+    // which would abandon the call while the tool was still working.
+    '  busctl --timeout=86400 call org.freedesktop.UDisks2 "$obj"' +
+      ' org.freedesktop.UDisks2.Filesystem "$method" "a{sv}" 0 || rc=$?',
+    'fi',
+    'if [ "$remount" = 1 ]; then udisksctl mount --no-user-interaction -b "$dev" >/dev/null || true; fi',
+    'exit $rc'
+  ].join("\n")
+
+  // One round trip per filesystem type, and only for the types attached.
+  readonly property string capsScript:
+    'for fs in "$@"; do for op in CanCheck CanRepair; do' +
+    ' out=$(busctl --timeout=10 call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager' +
+    ' org.freedesktop.UDisks2.Manager "$op" s "$fs" 2>/dev/null) || out="";' +
+    ' echo "$op $fs $out"; done; done'
+
+  function probeCapabilities() {
+    if (capsProcess.running) return
+    var types = Model.fsTypesPresent(devices)
+    var signature = types.join(",")
+    if (signature === _capsSignature) return
+    _capsSignature = signature
+    if (types.length === 0) {
+      fsCapabilities = ({ check: {}, repair: {} })
+      return
+    }
+    var command = ["bash", "-c", capsScript, "removable-drives"]
+    for (var i = 0; i < types.length; i++) command.push(types[i])
+    capsProcess.command = command
+    capsProcess.running = true
+  }
+
+  function deviceOfVolume(volume) {
+    if (!volume) return null
+    for (var d = 0; d < devices.length; d++) {
+      for (var v = 0; v < devices[d].volumes.length; v++) {
+        if (devices[d].volumes[v].fsPath === volume.fsPath) return devices[d]
+      }
+    }
+    return null
+  }
+
+  // All three take the filesystem offline, and unmounting a drive mid-copy is
+  // the one move this widget exists to prevent. Unlike an eject the request is
+  // refused rather than held: an eject that runs two seconds late is still the
+  // eject you asked for, while a rename that fires once you have wandered off
+  // is a drive silently unmounted behind you.
+  function fsActionBlocked(volume) {
+    if (!volume) return "No volume selected"
+    var device = deviceOfVolume(volume)
+    if (device && isDeviceBusy(device)) {
+      return device.title + " is still being written to — try again once it settles"
+    }
+    return ""
+  }
+
+  function runFsAction(volume, method, label, action, successMessage) {
+    runAction(["bash", "-c", fsScript, "removable-drives",
+               volume.fsPath, volume.mounted ? "1" : "0", method, label],
+              volume.fsPath, action, successMessage)
+  }
+
+  // These three answer with "ok" or with the reason they did not run, so a
+  // script calling them over IPC learns what the panel would have shown in its
+  // status line. Silence would be worse than a refusal: a rename that was
+  // turned away for a drive still settling looks exactly like one that worked.
+  function refuse(reason) {
+    lastError = reason
+    return reason
+  }
+
+  // "ISO9660 volumes" rather than "an ISO9660 volume", so the sentence does not
+  // have to guess at an article for a name it has never seen.
+  function describeFs(volume) {
+    var named = volume ? Model.clean(volume.fstypeLabel) : ""
+    if (named === "") named = volume ? Model.clean(volume.fstype) : ""
+    return named === "" ? "This filesystem" : named + " volumes"
+  }
+
+  function setVolumeLabel(volume, label) {
+    if (!volume) return "unknown volume"
+    if (busy) return refuse("Another action is still running")
+    if (!Model.canRelabel(volume)) {
+      return refuse(describeFs(volume) + " cannot be renamed from here")
+    }
+    var checked = Model.validateLabel(volume, label)
+    if (!checked.ok) return refuse(checked.message)
+    // Enter on a field nobody edited is the common case, and it should close
+    // the editor rather than unmount the drive to write the name it already
+    // has.
+    if (checked.label === Model.normaliseLabel(volume.label)) {
+      actionStatus = ""
+      return "unchanged"
+    }
+    var blocked = fsActionBlocked(volume)
+    if (blocked !== "") return refuse(blocked)
+    runFsAction(volume, "SetLabel", checked.label, "relabel",
+                checked.label === "" ? "Cleared the name on " + volume.title
+                                     : "Renamed " + volume.title + " to " + checked.label)
+    return "ok"
+  }
+
+  function checkVolume(volume) {
+    if (!volume) return "unknown volume"
+    if (busy) return refuse("Another action is still running")
+    if (!Model.canCheck(fsCapabilities, volume)) {
+      return refuse(describeFs(volume) + " cannot be checked here")
+    }
+    var blocked = fsActionBlocked(volume)
+    if (blocked !== "") return refuse(blocked)
+    runFsAction(volume, "Check", "", "check", "")
+    return "ok"
+  }
+
+  // Reachable only from the button a failed check puts on screen, so a repair
+  // — the one operation here that rewrites a filesystem — always follows a
+  // deliberate second click on a volume already known to be damaged.
+  function repairVolume(volume) {
+    if (!volume) return "unknown volume"
+    if (busy) return refuse("Another action is still running")
+    if (!Model.canRepair(fsCapabilities, volume)) {
+      return refuse(describeFs(volume) + " cannot be repaired here")
+    }
+    if (checkedFsPath !== volume.fsPath || checkVerdict !== false) {
+      return refuse("Check the filesystem before repairing it")
+    }
+    var blocked = fsActionBlocked(volume)
+    if (blocked !== "") return refuse(blocked)
+    runFsAction(volume, "Repair", "", "repair", "")
+    return "ok"
+  }
+
+  // Same bargain as the gvfs hint: a plugin may not install anything, so it
+  // names the package udisks went looking for and opens Omarchy's installer.
+  function installCheckTools(volume) {
+    var hint = Model.checkHint(fsCapabilities, volume)
+    if (!hint || hint.packages === "") return
+    _capsSignature = ""
+    Quickshell.execDetached(["omarchy-install-app", hint.label, hint.packages])
+  }
+
+  // Check exits 0 whether or not it liked what it found, so the verdict is on
+  // stdout rather than in the exit code, and a filesystem that failed its
+  // check is a result to report rather than an error to raise.
+  function applyVerdict(action, fsPath) {
+    var volume = volumeByPath(fsPath)
+    var verdict = Model.parseFsVerdict(_stdout)
+    var name = volume ? volume.title : "A drive"
+
+    if (action === "check") {
+      checkVerdict = verdict
+      checkedFsPath = fsPath
+      actionStatus = Model.describeCheck(volume, verdict)
+      if (verdict === false) {
+        notify("Filesystem errors found", name + " did not pass its check.",
+               Model.GLYPH_ALERT, "normal")
+      }
+      return
+    }
+
+    checkVerdict = null
+    checkedFsPath = ""
+    actionStatus = Model.describeRepair(volume, verdict)
+    // Three outcomes, not two: the tool can also finish without saying whether
+    // it fixed anything, and reporting that as a failed repair would be as
+    // wrong as reporting it as a clean one.
+    var repaired = verdict === true
+    notify(repaired ? "Repaired" : "Repair did not finish cleanly",
+           actionStatus,
+           repaired ? Model.GLYPH_HEALTHY : Model.GLYPH_ALERT,
+           repaired ? "" : "normal")
+  }
+
   // ------------------------------------------------ phones and cameras
 
   function refreshPortables() {
@@ -664,6 +909,7 @@ Item {
                       root._successMessage.replace(/^Safe to remove /, ""),
                       Model.GLYPH_EJECT)
         }
+        if (action === "check" || action === "repair") root.applyVerdict(action, path)
       } else {
         root._openAfterPath = ""
         var detail = Model.formatError(root._stderr)
@@ -700,6 +946,14 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.support = Model.parseSupport(text)
+    }
+  }
+
+  Process {
+    id: capsProcess
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.fsCapabilities = Model.parseFsCapabilities(text)
     }
   }
 

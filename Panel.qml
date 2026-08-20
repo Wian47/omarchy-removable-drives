@@ -43,6 +43,13 @@ Panel {
   // Key of the drive whose name is being edited inline, "" when none is.
   property string renamingKey: ""
 
+  // fsPath of the volume whose filesystem label is being edited, "" when none
+  // is. Separate from renamingKey because they name different things: the
+  // nickname above is this shell's private name for the hardware, while the
+  // label is written to the filesystem and travels with it to every other
+  // machine that reads the drive.
+  property string renamingLabelPath: ""
+
   readonly property var devices: drives.devices
   readonly property var rows: Model.navRows(drives.devices, drives.portables)
   property int cursor: 0
@@ -149,6 +156,17 @@ Panel {
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
+  function beginLabelEdit(volume) {
+    if (!volume || !Model.canRelabel(volume)) return
+    renamingKey = ""
+    renamingLabelPath = volume.fsPath
+  }
+
+  function finishLabelEdit() {
+    renamingLabelPath = ""
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
   // One click does the obvious thing: an unmounted volume mounts (and opens,
   // unless the user turned that off), a mounted one opens its folder.
   // Unmounting stays on its own button so it is never a stray click away.
@@ -191,17 +209,31 @@ Panel {
   onVisibleChanged: if (!visible && opened) close()
   onRowsChanged: {
     clampCursor()
+    var i
     if (renamingKey !== "") {
       var stillHere = false
-      for (var i = 0; i < devices.length; i++) {
+      for (i = 0; i < devices.length; i++) {
         if (devices[i].key === renamingKey) stillHere = true
       }
       if (!stillHere) renamingKey = ""
+    }
+    // A relabel unmounts and remounts, so the volume this editor belongs to
+    // comes and goes underneath it; it is the fsPath that has to still exist,
+    // not the mount.
+    if (renamingLabelPath !== "") {
+      var volumeHere = false
+      for (i = 0; i < devices.length; i++) {
+        for (var v = 0; v < devices[i].volumes.length; v++) {
+          if (devices[i].volumes[v].fsPath === renamingLabelPath) volumeHere = true
+        }
+      }
+      if (!volumeHere) renamingLabelPath = ""
     }
   }
   onOpenedChanged: {
     drives.watchClosely = opened
     renamingKey = ""
+    renamingLabelPath = ""
     if (opened) {
       cursorActive = false
       cursor = 0
@@ -251,6 +283,25 @@ Panel {
       return "unknown device: " + path
     }
 
+    // Rename the filesystem itself, addressed by the volume's own node
+    // ("/dev/sdb1") rather than the drive's. An empty name clears the label.
+    // Unlike `rename`, which only this shell ever sees, this writes to the
+    // drive and travels with it.
+    function label(path: string, name: string): string {
+      var volume = drives.volumeByPath(path)
+      if (!volume) return "unknown volume: " + path
+      return drives.setVolumeLabel(volume, name)
+    }
+
+    // Starts the check and returns "ok"; the verdict lands in `status` a
+    // moment later, because an fsck takes as long as it takes. Anything else
+    // it returns is the reason it did not start at all.
+    function check(path: string): string {
+      var volume = drives.volumeByPath(path)
+      if (!volume) return "unknown volume: " + path
+      return drives.checkVolume(volume)
+    }
+
     function phones(): string { return JSON.stringify(drives.portables) }
 
     function ejectAll(): string {
@@ -267,7 +318,10 @@ Panel {
         mounted: drives.mountedCount,
         busy: drives.anyBusy,
         writeRate: Math.round(drives.totalWriteRate),
-        pendingEject: drives.pendingEjectPath
+        pendingEject: drives.pendingEjectPath,
+        working: drives.busy,
+        checked: drives.checkedFsPath,
+        healthy: drives.checkVerdict
       })
     }
   }
@@ -323,9 +377,9 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      // While a nickname is being typed, every keystroke belongs to the
-      // text field rather than to the cursor.
-      blocked: root.renamingKey !== ""
+      // While a nickname or a label is being typed, every keystroke belongs to
+      // the text field rather than to the cursor.
+      blocked: root.renamingKey !== "" || root.renamingLabelPath !== ""
 
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) {
@@ -339,13 +393,15 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
-        if (text === "r" || text === "R") drives.refresh()
+        if (text === "r" || text === "R") drives.rescan()
         else if (text === "e") root.ejectCurrent()
         else if (text === "E") drives.ejectAll()
         else if (text === "o" || text === "O") drives.openVolume(root.currentVolume())
         else if (text === "t" || text === "T") drives.openTerminal(root.currentVolume())
         else if (text === "y" || text === "Y") drives.copyPath(root.currentVolume())
         else if (text === "n" || text === "N") root.beginRename(root.currentDevice())
+        else if (text === "l" || text === "L") root.beginLabelEdit(root.currentVolume())
+        else if (text === "c" || text === "C") drives.checkVolume(root.currentVolume())
         else if (text === "m" || text === "M") {
           if (root.currentRow && root.currentRow.kind === "portable") drives.togglePortable(root.currentPortable())
           else drives.toggleMount(root.currentVolume(), root.openOnMount)
@@ -409,7 +465,7 @@ Panel {
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                   enabled: !drives.refreshing
-                  onClicked: drives.refresh()
+                  onClicked: drives.rescan()
                 }
               }
             }
@@ -480,6 +536,39 @@ Panel {
               fontFamily: root.fontFamily
               Layout.alignment: Qt.AlignVCenter
               onClicked: drives.cancelPendingEject()
+            }
+          }
+
+          // A check that found something says so in the status line above; this
+          // is the offer to act on it. Repair is the one operation here that
+          // rewrites a filesystem, so it is never a click away from anything
+          // else — it exists only after a check has been run and only for the
+          // volume that check was about.
+          RowLayout {
+            visible: drives.checkedFsPath !== "" && drives.checkVerdict === false
+            width: parent.width
+            spacing: Style.space(8)
+
+            Text {
+              textFormat: Text.PlainText
+              Layout.fillWidth: true
+              text: "Repairing rewrites the filesystem. Copy anything you still need off it first."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            PanelActionButton {
+              iconText: Model.GLYPH_WRENCH
+              tooltipText: "Repair this filesystem"
+              foreground: root.foreground
+              hoverColor: root.urgent
+              fontFamily: root.fontFamily
+              enabled: !drives.busy
+                && Model.canRepair(drives.fsCapabilities, drives.volumeByPath(drives.checkedFsPath))
+              Layout.alignment: Qt.AlignVCenter
+              onClicked: drives.repairVolume(drives.volumeByPath(drives.checkedFsPath))
             }
           }
 
@@ -860,6 +949,29 @@ Panel {
     readonly property bool working: volume && drives.busyPath === volume.fsPath
     readonly property real trashBytes: volume ? drives.trashSizeFor(volume) : 0
 
+    readonly property bool renamingLabel: volume && root.renamingLabelPath === volume.fsPath
+    readonly property bool canCheck: volume && Model.canCheck(drives.fsCapabilities, volume)
+    readonly property var checkHint: volume ? Model.checkHint(drives.fsCapabilities, volume) : null
+
+    // Live while the field is open, so a name two characters too long says so
+    // before Enter rather than after a round trip that unmounted the drive.
+    readonly property var labelCheck: renamingLabel && volume
+      ? Model.validateLabel(volume, labelField.text)
+      : null
+    readonly property int labelRoom: renamingLabel && volume
+      ? Model.labelRemaining(volume, labelField.text)
+      : 0
+
+    // Both call back to the row, which calls the panel, for the same reason
+    // the device row does: neither `root` nor a sibling function resolves
+    // inside a qs.Ui TextField's own handlers.
+    function commitLabel(value) {
+      drives.setVolumeLabel(volumeRow.volume, value)
+      root.finishLabelEdit()
+    }
+
+    function cancelLabel() { root.finishLabelEdit() }
+
     hasCursor: selected
     foreground: root.foreground
     implicitHeight: volumeContent.implicitHeight + Style.spacing.rowPaddingX
@@ -869,9 +981,11 @@ Panel {
     MouseArea {
       anchors.fill: parent
       hoverEnabled: true
-      cursorShape: volumeRow.actionable ? Qt.PointingHandCursor : Qt.ArrowCursor
+      cursorShape: volumeRow.actionable && !volumeRow.renamingLabel ? Qt.PointingHandCursor : Qt.ArrowCursor
       onEntered: root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex))
-      onClicked: root.activateVolume(volumeRow.volume)
+      // A click anywhere on the row mounts or opens it, which is the wrong
+      // answer for someone reaching past a half-typed name to their cursor.
+      onClicked: if (!volumeRow.renamingLabel) root.activateVolume(volumeRow.volume)
     }
 
     RowLayout {
@@ -899,6 +1013,7 @@ Panel {
 
         Text {
           textFormat: Text.PlainText
+          visible: !volumeRow.renamingLabel
           Layout.fillWidth: true
           text: volumeRow.volume ? volumeRow.volume.title : ""
           color: volumeRow.volume && volumeRow.volume.mounted ? root.foreground : Qt.darker(root.foreground, 1.25)
@@ -907,14 +1022,60 @@ Panel {
           elide: Text.ElideRight
         }
 
+        // Renaming the filesystem itself. Enter writes the new label, Escape
+        // leaves the drive as it was, and an empty name clears the label
+        // rather than storing a blank one — which is the state a drive ships
+        // in before anybody names it.
+        RowLayout {
+          visible: volumeRow.renamingLabel
+          Layout.fillWidth: true
+          spacing: Style.space(6)
+
+          TextField {
+            id: labelField
+            Layout.fillWidth: true
+            foreground: root.foreground
+            verticalPadding: Style.space(2)
+            placeholderText: volumeRow.volume && volumeRow.volume.fstypeLabel !== ""
+              ? volumeRow.volume.fstypeLabel + " label"
+              : "Volume label"
+            onVisibleChanged: if (visible) {
+              text = volumeRow.volume ? volumeRow.volume.label : ""
+              Qt.callLater(function() { labelField.forceActiveFocus(); labelField.selectAll() })
+            }
+            onAccepted: volumeRow.commitLabel(text)
+            Keys.onEscapePressed: volumeRow.cancelLabel()
+          }
+
+          // Every filesystem has its own ceiling — eleven characters on FAT32
+          // and exFAT, sixteen on ext4 — and the number is the only way to
+          // know which one you are up against before the write is refused.
+          Text {
+            textFormat: Text.PlainText
+            text: volumeRow.labelRoom
+            color: volumeRow.labelRoom < 0 ? root.urgent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            Layout.alignment: Qt.AlignVCenter
+          }
+        }
+
         Text {
           textFormat: Text.PlainText
           Layout.fillWidth: true
-          text: volumeRow.working ? "Working…" : Model.volumeMeta(volumeRow.volume)
-          color: root.dim
+          text: {
+            if (volumeRow.renamingLabel) {
+              if (volumeRow.labelCheck && !volumeRow.labelCheck.ok) return volumeRow.labelCheck.message
+              return "Enter renames the filesystem · Esc cancels"
+            }
+            return volumeRow.working ? "Working…" : Model.volumeMeta(volumeRow.volume)
+          }
+          color: volumeRow.renamingLabel && volumeRow.labelCheck && !volumeRow.labelCheck.ok
+            ? root.urgent : root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideMiddle
+          wrapMode: volumeRow.renamingLabel ? Text.WordWrap : Text.NoWrap
         }
 
         // Usage bar, drawn only for mounted volumes: an unmounted partition
@@ -980,6 +1141,42 @@ Panel {
             enabled: !drives.busy
             onClicked: drives.emptyTrash(volumeRow.volume)
           }
+        }
+      }
+
+      // Renaming and checking both take the filesystem offline and put it
+      // back, so neither is offered while the drive is being written to —
+      // the service refuses and says so rather than unmounting mid-copy.
+      PanelActionButton {
+        visible: volumeRow.volume && Model.canRelabel(volumeRow.volume) && !volumeRow.renamingLabel
+        iconText: Model.GLYPH_TAG
+        tooltipText: "Rename this volume — changes the label on the drive itself"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        enabled: !drives.busy
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex)) }
+        onClicked: root.beginLabelEdit(volumeRow.volume)
+      }
+
+      // When udisks cannot run the check it names the tool it went looking
+      // for, so the button stays — dimmed, and offering to install it — rather
+      // than vanishing and leaving the gap unexplained.
+      PanelActionButton {
+        visible: volumeRow.canCheck
+          || (volumeRow.checkHint !== null && volumeRow.checkHint.packages !== "")
+        iconText: Model.GLYPH_STETHOSCOPE
+        tooltipText: volumeRow.canCheck
+          ? "Check this filesystem for errors — unmounts it and mounts it back"
+          : (volumeRow.checkHint ? volumeRow.checkHint.text + " — click to install it" : "")
+        foreground: volumeRow.canCheck ? root.foreground : root.dim
+        fontFamily: root.fontFamily
+        enabled: !drives.busy
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex)) }
+        onClicked: {
+          if (volumeRow.canCheck) drives.checkVolume(volumeRow.volume)
+          else drives.installCheckTools(volumeRow.volume)
         }
       }
 

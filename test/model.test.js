@@ -903,5 +903,195 @@ test("a serial with odd spacing still keys the same drive every time", () => {
   assert.strictEqual(api.driveKey(devices[0]), "serial:AB  12")
 })
 
+console.log("\nvolume labels")
+
+// A volume as the panel hands one to these, rather than a whole lsblk tree:
+// what they need is the filesystem type and whether it is readable yet.
+function volume(overrides) {
+  return Object.assign({
+    fsPath: "/dev/sdb1", label: "STICK", title: "STICK",
+    fstype: "vfat", fstypeLabel: "FAT32",
+    mounted: false, encrypted: false, unlocked: false
+  }, overrides)
+}
+
+test("each filesystem carries its own label ceiling", () => {
+  assert.strictEqual(api.labelLimit("vfat"), 11)
+  assert.strictEqual(api.labelLimit("exfat"), 11)
+  assert.strictEqual(api.labelLimit("ext4"), 16)
+  assert.strictEqual(api.labelLimit("xfs"), 12)
+  assert.strictEqual(api.labelLimit("ntfs"), 128)
+  assert.strictEqual(api.labelLimit("btrfs"), 256)
+})
+
+test("a filesystem with no tool to write its label cannot be renamed", () => {
+  assert.strictEqual(api.labelLimit("hfsplus"), 0)
+  assert.strictEqual(api.canRelabel(volume({ fstype: "hfsplus", fstypeLabel: "HFS+" })), false)
+  assert.strictEqual(api.canRelabel(volume({ fstype: "" })), false)
+  assert.strictEqual(api.canRelabel(null), false)
+})
+
+test("a locked LUKS volume has no filesystem to rename yet", () => {
+  assert.strictEqual(api.canRelabel(volume({ fstype: "ext4", encrypted: true, unlocked: false })), false)
+  assert.strictEqual(api.canRelabel(volume({ fstype: "ext4", encrypted: true, unlocked: true })), true)
+})
+
+test("a name over the limit is refused, and says by how much", () => {
+  const result = api.validateLabel(volume({}), "WAYTOOLONGLABEL")
+  assert.strictEqual(result.ok, false)
+  assert.match(result.message, /FAT32 labels are at most 11 characters/)
+  assert.match(result.message, /that is 4 too many/)
+})
+
+test("a name exactly at the limit is accepted", () => {
+  assert.strictEqual(api.validateLabel(volume({}), "ELEVENCHARS").ok, true)
+  assert.strictEqual(api.validateLabel(volume({ fstype: "ext4", fstypeLabel: "EXT4" }), "SIXTEEN CHARSXX").ok, true)
+})
+
+test("FAT32 refuses the DOS reserved characters, one at a time", () => {
+  for (const bad of ['"', "*", "/", ":", "<", ">", "?", "\\", "|"]) {
+    const result = api.validateLabel(volume({}), "MY" + bad + "DISK")
+    assert.strictEqual(result.ok, false, "expected " + bad + " to be refused")
+    assert.match(result.message, /cannot contain/)
+  }
+})
+
+test("those characters are only FAT32's problem", () => {
+  assert.strictEqual(api.validateLabel(volume({ fstype: "ext4", fstypeLabel: "EXT4" }), "my:disk").ok, true)
+})
+
+test("an empty name is a real answer — it clears the label", () => {
+  const result = api.validateLabel(volume({}), "   ")
+  assert.strictEqual(result.ok, true)
+  assert.strictEqual(result.label, "")
+})
+
+test("a name is trimmed at the ends but keeps its interior spacing", () => {
+  const result = api.validateLabel(volume({ fstype: "ext4", fstypeLabel: "EXT4" }), "  MY  DISK  ")
+  assert.strictEqual(result.ok, true)
+  assert.strictEqual(result.label, "MY  DISK",
+    "clean() would collapse the double space into a different name than the one on screen")
+})
+
+test("the length that counts is the trimmed one", () => {
+  assert.strictEqual(api.validateLabel(volume({}), "  ELEVENCHARS  ").ok, true)
+  assert.strictEqual(api.labelRemaining(volume({}), "  ELEVENCHARS  "), 0)
+})
+
+test("the counter goes negative once the name is too long", () => {
+  assert.strictEqual(api.labelRemaining(volume({}), ""), 11)
+  assert.strictEqual(api.labelRemaining(volume({}), "STICK"), 6)
+  assert.strictEqual(api.labelRemaining(volume({}), "WAYTOOLONGLABEL"), -4)
+})
+
+test("a filesystem we cannot label is refused rather than validated", () => {
+  const result = api.validateLabel(volume({ fstype: "hfsplus", fstypeLabel: "HFS+" }), "NAME")
+  assert.strictEqual(result.ok, false)
+  assert.match(result.message, /HFS\+ labels cannot be changed/)
+})
+
+console.log("\nchecking and repair")
+
+const CAPS = api.parseFsCapabilities([
+  'CanCheck vfat (bs) true ""',
+  'CanRepair vfat (bs) true ""',
+  'CanCheck ntfs (bs) false "ntfsfix"',
+  'CanRepair ntfs (bs) false "ntfsfix"',
+  "CanCheck nilfs2",
+  "CanRepair nilfs2"
+].join("\n"))
+
+test("udisks answering yes is read as yes", () => {
+  assert.deepStrictEqual(CAPS.check.vfat, { supported: true, available: true, missing: "" })
+  assert.strictEqual(api.canCheck(CAPS, volume({ fstype: "vfat" })), true)
+  assert.strictEqual(api.canRepair(CAPS, volume({ fstype: "vfat" })), true)
+})
+
+test("udisks answering no also names the tool it went looking for", () => {
+  assert.deepStrictEqual(CAPS.check.ntfs, { supported: true, available: false, missing: "ntfsfix" })
+  assert.strictEqual(api.canCheck(CAPS, volume({ fstype: "ntfs" })), false)
+})
+
+test("a filesystem udisks refuses outright answers with nothing at all", () => {
+  assert.deepStrictEqual(CAPS.check.nilfs2, { supported: false, available: false, missing: "" })
+  assert.strictEqual(api.canCheck(CAPS, volume({ fstype: "nilfs2" })), false)
+})
+
+test("a filesystem never probed is not assumed checkable", () => {
+  assert.strictEqual(api.canCheck(CAPS, volume({ fstype: "ext4" })), false)
+  assert.strictEqual(api.canCheck({ check: {}, repair: {} }, volume({ fstype: "vfat" })), false)
+})
+
+test("a locked LUKS volume is never offered a check", () => {
+  const locked = volume({ fstype: "vfat", encrypted: true, unlocked: false })
+  assert.strictEqual(api.canCheck(CAPS, locked), false)
+  assert.strictEqual(api.canRepair(CAPS, locked), false)
+})
+
+test("a missing tool becomes a package to install", () => {
+  const hint = api.checkHint(CAPS, volume({ fstype: "ntfs", fstypeLabel: "NTFS" }))
+  assert.strictEqual(hint.packages, "ntfs-3g")
+  assert.match(hint.text, /Checking NTFS needs ntfsfix/)
+})
+
+test("nothing is hinted when the check is already available", () => {
+  assert.strictEqual(api.checkHint(CAPS, volume({ fstype: "vfat" })), null)
+})
+
+test("a filesystem udisks will never check offers no package to install", () => {
+  const hint = api.checkHint(CAPS, volume({ fstype: "nilfs2", fstypeLabel: "NILFS2" }))
+  assert.strictEqual(hint.packages, "", "there is nothing to install that would help")
+  assert.match(hint.text, /cannot check/)
+})
+
+test("only the filesystem types actually attached are probed", () => {
+  const devices = api.parse(tree([
+    disk({ children: [part({ fstype: "vfat" }), part({ name: "sdb2", path: "/dev/sdb2", fstype: "ext4" })] }),
+    disk({ name: "sdc", path: "/dev/sdc", children: [part({ name: "sdc1", path: "/dev/sdc1", fstype: "vfat" })] })
+  ]))
+  assert.deepStrictEqual(api.fsTypesPresent(devices), ["ext4", "vfat"],
+    "sorted and deduplicated, because this list is also the signature that decides whether to probe again")
+})
+
+test("a locked LUKS partition contributes no filesystem to probe for", () => {
+  const devices = api.parse(tree([disk({ children: [part({ fstype: "crypto_LUKS", label: null })] })]))
+  assert.deepStrictEqual(api.fsTypesPresent(devices), [])
+})
+
+test("the verdict is read off stdout, because a bad filesystem still exits 0", () => {
+  assert.strictEqual(api.parseFsVerdict("b true\n"), true)
+  assert.strictEqual(api.parseFsVerdict("b false\n"), false)
+})
+
+test("an answer we cannot read is not quietly taken for a healthy one", () => {
+  for (const raw of ["", "\n", "true", "b maybe", "Call failed: something"]) {
+    assert.strictEqual(api.parseFsVerdict(raw), null, JSON.stringify(raw))
+  }
+})
+
+test("each verdict is described without overstating it", () => {
+  const v = volume({ title: "BACKUP" })
+  assert.strictEqual(api.describeCheck(v, true), "No errors found on BACKUP")
+  assert.strictEqual(api.describeCheck(v, false), "Errors found on BACKUP")
+  assert.match(api.describeCheck(v, null), /Could not tell/)
+  assert.strictEqual(api.describeRepair(v, true), "Repaired BACKUP")
+  assert.match(api.describeRepair(v, false), /could not be fully repaired/)
+})
+
+test("busctl's failures read as sentences, not as call plumbing", () => {
+  assert.strictEqual(
+    api.formatError("Call failed: Label for VFAT filesystem must be at most 11 characters long."),
+    "Label for VFAT filesystem must be at most 11 characters long.")
+  assert.strictEqual(
+    api.formatError("Call failed: Cannot check filesystem on /dev/sdb1 if mounted"),
+    "Cannot check filesystem on /dev/sdb1 if mounted")
+})
+
+test("udisksctl's own error shape still survives the extra strip", () => {
+  assert.strictEqual(
+    api.formatError("Error unmounting: GDBus.Error:org.freedesktop.UDisks2.Error.DeviceBusy: Target is busy"),
+    "Target is busy")
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

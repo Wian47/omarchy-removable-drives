@@ -26,6 +26,17 @@ and the bar goes back to what it was.
   command of your choosing when it appears.
 - **Empties the trash you cannot see** — the `.Trash-1000` that quietly fills a
   stick with files you thought were deleted.
+- **Renames the drive itself.** A nickname is private to this shell; the volume
+  label is written to the filesystem and travels with the stick to every other
+  machine that reads it. Each filesystem has its own ceiling — eleven
+  characters on FAT32 and exFAT, sixteen on ext4 — and the field counts down
+  against the right one as you type, rather than after a failed write.
+- **Checks a filesystem, and repairs it only if you ask twice.** udisks runs
+  the fsck; the panel unmounts the volume first and mounts it back afterwards,
+  even if the check failed. Repair is the one thing here that rewrites a
+  filesystem, so it appears only after a check has actually found something —
+  never one stray click from the mount button. When the tool for a filesystem
+  is missing, udisks names it and the panel offers to install it.
 - **Never offers to eject the disk you booted from.** A USB-booted system disk
   reports itself as removable just like a thumb drive; anything holding `/`,
   `/boot` or `/home` is left out entirely.
@@ -40,8 +51,8 @@ omarchy plugin add https://github.com/Wian47/omarchy-removable-drives.git --enab
 ```
 
 Needs Omarchy 4 (Quattro) and `udisks2`, both standard. It calls `lsblk`,
-`udevadm`, `udisksctl`, `gio`, `fuser`, `du`, `wl-copy` and Omarchy's own
-`omarchy-*` helpers — nothing runs as root.
+`udevadm`, `udisksctl`, `busctl`, `gio`, `fuser`, `du`, `wl-copy` and Omarchy's
+own `omarchy-*` helpers — nothing runs as root.
 
 To remove it:
 
@@ -79,7 +90,8 @@ originals are not on the device.
 | Volume row | click = mount and open, or open if mounted · middle-click = copy its path |
 | Phone row | click = browse (mounting on demand) |
 | 󰄠 󰝰 󰄝 | mount · open · unmount that volume |
-| ⏏ ✏ | eject the drive (or cancel a held eject) · rename it |
+| 󰓹 󰓙 | rename the volume · check it for errors |
+| ⏏ ✏ | eject the drive (or cancel a held eject) · nickname it |
 | ⏏ in the header | eject every attached drive |
 
 Keyboard, while the panel is open:
@@ -90,7 +102,8 @@ Keyboard, while the panel is open:
 | `Enter` `Space` | mount and open, or eject | `E` | eject every drive |
 | `m` | mount or unmount | `t` | terminal at this volume |
 | `o` | open | `y` | copy its path |
-| `n` | rename the drive | `r` `Esc` | rescan · close |
+| `n` | nickname the drive | `r` `Esc` | rescan · close |
+| `l` | rename the volume | `c` | check it for errors |
 
 ## Settings
 
@@ -134,11 +147,19 @@ omarchy-shell removable-drives phones                        # phones, as JSON
 omarchy-shell removable-drives status                        # {"busy":false,…}
 omarchy-shell removable-drives eject /dev/sdb                # or ejectAll
 omarchy-shell removable-drives rename /dev/sdb "Work backup" # "" clears it
+omarchy-shell removable-drives label /dev/sdb1 "Photos"      # the label on the drive
+omarchy-shell removable-drives check /dev/sdb1               # verdict lands in status
 ```
 
 `status` reports `busy: true` while the kernel still has I/O in flight, so a
 backup script can wait for the drive to settle. Both eject calls wait for
 pending writes by themselves.
+
+`rename` names the drive for this shell only; `label` writes to the filesystem.
+`check` starts an fsck and returns straight away — the verdict arrives in
+`status` as `healthy`, which is `true`, `false`, or `null` when the answer
+could not be read. Anything other than `ok` back from these is the reason they
+did not run, so a script never has to guess whether a refusal happened.
 
 ## How it works
 
@@ -153,13 +174,22 @@ input: whoever formatted a stick chooses its label. Every `Text` is pinned to
 are stripped of angle brackets first. Paths stay byte-exact, since commands are
 built from them.
 
+Renaming a filesystem and running its fsck are the two things udisks exposes
+on D-Bus that `udisksctl` has no verb for, so they go over the bus through
+`busctl`. Both are `modify-device` in the udisks policy — `allow_active: yes`
+for a removable drive, the same no-password path mounting already takes. The
+object path is asked for rather than built, because udisks escapes the kernel
+name into it and an unlocked LUKS volume ends up at `dm_2d3` rather than
+anything the device node hints at. Both operations unmount the filesystem
+first and mount it back afterwards, whether or not the middle step worked.
+
 Emptying a drive's trash is the only recursive delete here, so the path is
 re-derived from the live mount list and must exactly match a `.Trash-<uid>`
 candidate of a mounted removable volume. The tests assert it refuses `/`,
 `$HOME`, the mount root, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 75 tests, no compositor required
+node test/model.test.js       # 116 tests, no compositor required
 omarchy plugin validate .     # the same check the shell applies
 ```
 
