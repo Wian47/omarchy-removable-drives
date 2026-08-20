@@ -1093,5 +1093,47 @@ test("udisksctl's own error shape still survives the extra strip", () => {
     "Target is busy")
 })
 
+console.log("\nwhat the install hint promises")
+
+const APPLE_SUPPORT = api.parseSupport("backend mtp\nusb 05ac,06,ff iPhone\n")
+
+test("the caption names every package the button installs", () => {
+  const hint = api.supportHint(APPLE_SUPPORT)
+  const named = hint.detail.split(/,\s*|\s+and\s+/).filter(Boolean).sort()
+  const installed = hint.packages.split(" ").filter(Boolean).sort()
+  assert.deepStrictEqual(named, installed,
+    "the caption drifted from the package list once and promised two of three")
+})
+
+test("the sentence counts every package the button installs", () => {
+  const hint = api.supportHint(APPLE_SUPPORT)
+  assert.match(hint.text, /needs three more packages/)
+  assert.strictEqual(hint.detail, "usbmuxd, gvfs-afc and gvfs-gphoto2")
+})
+
+test("a single package is described in the singular", () => {
+  const camera = api.supportHint(api.parseSupport("usb 04a9,06 Canon\n"))
+  assert.strictEqual(camera.detail, "gvfs-gphoto2")
+  assert.strictEqual(api.describePackages("gvfs-gphoto2").phrase, "one more package")
+})
+
+test("counting is spelled out up to six and falls back to digits", () => {
+  assert.strictEqual(api.describePackages("a b").phrase, "two more packages")
+  assert.strictEqual(api.describePackages("a b c d e f").phrase, "six more packages")
+  assert.strictEqual(api.describePackages("a b c d e f g").phrase, "7 more packages")
+})
+
+test("odd spacing in a package list does not become an empty name", () => {
+  assert.deepStrictEqual(api.packageList("  usbmuxd   gvfs-afc  "), ["usbmuxd", "gvfs-afc"])
+  assert.strictEqual(api.describePackages("").detail, "")
+  assert.strictEqual(api.describePackages("").count, 0)
+})
+
+test("only the Apple hint asks for a reconnect", () => {
+  assert.strictEqual(api.supportHint(APPLE_SUPPORT).reconnect, true,
+    "usbmuxd is udev-activated, so it does not start until the cable moves")
+  assert.strictEqual(api.supportHint(api.parseSupport("usb 04a9,06 Canon\n")).reconnect, false)
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

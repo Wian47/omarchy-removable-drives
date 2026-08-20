@@ -239,6 +239,11 @@ Panel {
       cursor = 0
       if (panelFlick) panelFlick.contentY = 0
       drives.refresh()
+      // Phones are not block devices, so nothing about mounting one reaches
+      // udev — and udev is the only thing that would otherwise re-list them.
+      // A phone mounted or dropped while the panel was shut stayed stale on
+      // screen until something unrelated happened to trigger a probe.
+      drives.refreshPortables()
       Qt.callLater(function() { keyCatcher.forceActiveFocus() })
     }
   }

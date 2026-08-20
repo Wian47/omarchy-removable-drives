@@ -772,6 +772,14 @@ Item {
     var hint = supportHint
     if (!hint) return
     Quickshell.execDetached(["omarchy-install-app", hint.label, hint.packages])
+    // Installing usbmuxd does not start it: its udev rule fires when an Apple
+    // device is plugged in, so a phone that was already connected when the
+    // packages landed leaves AFC silently unavailable. The install terminal
+    // says "Done" and the panel would otherwise still show nothing, with no
+    // hint that the cable is the last step.
+    actionStatus = hint.reconnect
+      ? "Once the install finishes, unplug the device and plug it back in"
+      : "Reconnect the device once the install finishes"
   }
 
   function mountPortable(entry) {

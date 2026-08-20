@@ -826,6 +826,43 @@ function parseSupport(raw) {
 
 // What to say when something is plugged in that gvfs cannot reach. Silence
 // reads as a broken widget, which is the one outcome worth avoiding.
+// The sentence and the caption under it are both built from the package list
+// rather than written alongside it. Written by hand they drifted: the panel
+// offered "two more packages", named two, and installed three. A widget whose
+// whole argument is that it tells you the truth about your drives cannot
+// misreport what it is about to install on your machine.
+function packageList(packages) {
+  var parts = clean(packages).split(" ")
+  var out = []
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i] !== "") out.push(parts[i])
+  }
+  return out
+}
+
+var COUNT_WORDS = ["no", "one", "two", "three", "four", "five", "six"]
+
+function countWord(count) {
+  return COUNT_WORDS[count] !== undefined ? COUNT_WORDS[count] : String(count)
+}
+
+// "usbmuxd, gvfs-afc and gvfs-gphoto2" — an Oxford-less list, because it is
+// read as a caption rather than parsed.
+function joinNames(list) {
+  if (list.length === 0) return ""
+  if (list.length === 1) return list[0]
+  return list.slice(0, list.length - 1).join(", ") + " and " + list[list.length - 1]
+}
+
+function describePackages(packages) {
+  var list = packageList(packages)
+  return {
+    detail: joinNames(list),
+    count: list.length,
+    phrase: list.length === 1 ? "one more package" : countWord(list.length) + " more packages"
+  }
+}
+
 function supportHint(support) {
   if (!support) return null
   var backends = support.backends || {}
@@ -834,19 +871,28 @@ function supportHint(support) {
   for (var i = 0; i < devices.length; i++) {
     var device = devices[i]
     if (device.vendor === APPLE_VENDOR && !backends.afc) {
+      var apple = describePackages("usbmuxd gvfs-afc gvfs-gphoto2")
       return {
-        text: (device.name !== "" ? device.name : "An Apple device") + " is connected, but Linux needs two more packages to browse it",
-        detail: "usbmuxd and gvfs-afc",
+        text: (device.name !== "" ? device.name : "An Apple device") +
+              " is connected, but Linux needs " + apple.phrase + " to browse it",
+        detail: apple.detail,
         packages: "usbmuxd gvfs-afc gvfs-gphoto2",
-        label: "iPhone support"
+        label: "iPhone support",
+        // usbmuxd is started by a udev rule that fires when an Apple device is
+        // plugged in. Installing it while the phone is already connected
+        // leaves it inactive, and AFC stays silently unavailable until the
+        // cable is pulled — which nothing else on screen would ever tell you.
+        reconnect: true
       }
     }
     if (device.classes.indexOf(IMAGING_CLASS) !== -1 && !backends.gphoto2 && !backends.mtp) {
+      var camera = describePackages("gvfs-gphoto2")
       return {
         text: (device.name !== "" ? device.name : "A camera") + " is connected, but no gvfs backend can read it",
-        detail: "gvfs-gphoto2",
+        detail: camera.detail,
         packages: "gvfs-gphoto2",
-        label: "Camera support"
+        label: "Camera support",
+        reconnect: false
       }
     }
   }
