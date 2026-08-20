@@ -67,15 +67,13 @@ to Omarchy's plugin commands and nicknames live in the file above.
 ### Phones
 
 Omarchy ships `gvfs-mtp`, so **Android works out of the box**. Apple devices
-speak AFC and need more:
+speak AFC and need three packages Omarchy does not ship: `usbmuxd`, `gvfs-afc`
+and `gvfs-gphoto2`.
 
-```bash
-sudo pacman -S --needed usbmuxd gvfs-afc gvfs-gphoto2
-```
-
-A plugin may not install packages — Omarchy's installer never runs sudo, by
-design — so when something is plugged in that gvfs cannot reach, the panel says
-which packages are missing and offers to open Omarchy's installer.
+A plugin may not install packages itself — Omarchy's own installer is the only
+thing that may, and it asks first — so when something is plugged in that gvfs
+cannot reach, the panel names the missing packages and offers to open that
+installer for them.
 
 A trusted iPhone appears as **two** entries: app documents over AFC, and the
 camera roll over PTP. Apple limits both, and with iCloud Photos set to

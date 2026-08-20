@@ -787,8 +787,8 @@ function portableMeta(entry) {
 // gvfs-mtp for Android, gvfs-afc (plus the usbmuxd daemon) for an iPhone,
 // gvfs-gphoto2 for a camera. Omarchy ships gvfs-mtp, so Android works out of
 // the box and Apple does not. A plugin may not install packages — Omarchy's
-// plugin installer never runs sudo or install hooks — so the most it can
-// honestly do is notice the gap and offer to open an installer.
+// plugin installer never runs install hooks — so the most it can honestly do
+// is notice the gap and offer to open an installer.
 //
 // gvfs advertises what it can mount in /usr/share/gvfs/mounts/<scheme>.mount,
 // which makes availability a file check rather than a guess.

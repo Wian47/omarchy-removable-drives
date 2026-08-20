@@ -633,9 +633,9 @@ Panel {
             }
 
             // Something is plugged in that gvfs has no backend for. A plugin
-            // cannot install packages — Omarchy's installer never runs sudo —
-            // so this explains the gap and opens Omarchy's own installer
-            // rather than leaving the section mysteriously empty.
+            // cannot install packages — only Omarchy's own installer may —
+            // so this explains the gap and opens that installer rather than
+            // leaving the section mysteriously empty.
             RowLayout {
               visible: drives.supportHint !== null
               width: parent.width
