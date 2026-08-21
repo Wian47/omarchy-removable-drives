@@ -73,7 +73,25 @@ Item {
   // exact path and only while the answer was false, so it cannot be started
   // against a volume nobody has looked at.
   property string checkedFsPath: ""
+  property string checkedUuid: ""
   property var checkVerdict: null
+
+  // Whether the repair button may be shown at all. Recomputed from the live
+  // device list, so swapping the drive for another that lands on the same
+  // /dev node retracts the offer instead of re-pointing it.
+  readonly property bool repairOffered: {
+    if (checkedFsPath === "" || checkVerdict !== false) return false
+    for (var d = 0; d < devices.length; d++) {
+      var volumes = devices[d].volumes
+      for (var v = 0; v < volumes.length; v++) {
+        if (volumes[v].fsPath === checkedFsPath) {
+          return Model.repairAuthorised(
+            { fsPath: checkedFsPath, uuid: checkedUuid, verdict: checkVerdict }, volumes[v])
+        }
+      }
+    }
+    return false
+  }
 
   readonly property bool busy: actionProcess.running
   readonly property int deviceCount: devices.length
@@ -316,6 +334,7 @@ Item {
     blockers = []
     blockedFsPath = ""
     checkedFsPath = ""
+    checkedUuid = ""
     checkVerdict = null
     _stdout = ""
     _stderr = ""
@@ -590,7 +609,17 @@ Item {
     '  busctl --timeout=86400 call org.freedesktop.UDisks2 "$obj"' +
       ' org.freedesktop.UDisks2.Filesystem "$method" "a{sv}" 0 || rc=$?',
     'fi',
-    'if [ "$remount" = 1 ]; then udisksctl mount --no-user-interaction -b "$dev" >/dev/null || true; fi',
+    // Putting the filesystem back can fail on its own — the drive was renamed
+    // or repaired and is now sitting unmounted. Swallowing that reported the
+    // rename as a plain success while the drive had quietly gone away, so it
+    // comes back as its own exit code when nothing else went wrong, and as an
+    // extra line on stderr when something did.
+    'remount_rc=0',
+    'if [ "$remount" = 1 ]; then udisksctl mount --no-user-interaction -b "$dev" >/dev/null || remount_rc=$?; fi',
+    'if [ "$remount_rc" != 0 ]; then',
+    '  echo "the filesystem could not be mounted again" >&2',
+    '  if [ "$rc" = 0 ]; then rc=75; fi',
+    'fi',
     'exit $rc'
   ].join("\n")
 
@@ -708,8 +737,9 @@ Item {
     if (!Model.canRepair(fsCapabilities, volume)) {
       return refuse(describeFs(volume) + " cannot be repaired here")
     }
-    if (checkedFsPath !== volume.fsPath || checkVerdict !== false) {
-      return refuse("Check the filesystem before repairing it")
+    if (!Model.repairAuthorised(
+          { fsPath: checkedFsPath, uuid: checkedUuid, verdict: checkVerdict }, volume)) {
+      return refuse("Check this filesystem before repairing it")
     }
     var blocked = fsActionBlocked(volume)
     if (blocked !== "") return refuse(blocked)
@@ -737,6 +767,7 @@ Item {
     if (action === "check") {
       checkVerdict = verdict
       checkedFsPath = fsPath
+      checkedUuid = volume ? volume.uuid : ""
       actionStatus = Model.describeCheck(volume, verdict)
       if (verdict === false) {
         notify("Filesystem errors found", name + " did not pass its check.",
@@ -747,6 +778,7 @@ Item {
 
     checkVerdict = null
     checkedFsPath = ""
+    checkedUuid = ""
     actionStatus = Model.describeRepair(volume, verdict)
     // Three outcomes, not two: the tool can also finish without saying whether
     // it fixed anything, and reporting that as a failed repair would be as
@@ -910,7 +942,11 @@ Item {
       root.busyPath = ""
       root.busyAction = ""
 
-      if (exitCode === 0) {
+      // The work itself landed either way; the remount is what separates these.
+      // A filesystem that was renamed and then failed to mount back is still
+      // renamed, so the verdict and the success message stand — but the drive
+      // is gone from the file manager, and that is the part worth shouting.
+      if (exitCode === 0 || exitCode === Model.EXIT_REMOUNT_FAILED) {
         root.actionStatus = root._successMessage
         if (action === "eject") {
           root.notify("Safe to remove",
@@ -918,6 +954,11 @@ Item {
                       Model.GLYPH_EJECT)
         }
         if (action === "check" || action === "repair") root.applyVerdict(action, path)
+        if (exitCode === Model.EXIT_REMOUNT_FAILED) {
+          root.lastError = Model.remountWarning(root.actionStatus)
+          root.actionStatus = ""
+          root.notify("Left unmounted", root.lastError, Model.GLYPH_ALERT, "normal")
+        }
       } else {
         root._openAfterPath = ""
         var detail = Model.formatError(root._stderr)

@@ -1113,6 +1113,36 @@ function parseFsVerdict(raw) {
   return null
 }
 
+// A /dev path is reusable. Pull the stick that just failed its check, push in
+// another, and the kernel can hand the new one the same /dev/sda1 — at which
+// point a repair authorised by path alone would rewrite a filesystem nobody
+// ever looked at. Repair is the only thing here that rewrites a filesystem, so
+// its authorisation has to name the filesystem itself, not the socket it
+// happens to be sitting in.
+//
+// A volume with no UUID cannot be identified again after it disappears, so it
+// is refused rather than repaired on a maybe.
+function repairAuthorised(check, volume) {
+  if (!check || !volume) return false
+  if (check.verdict !== false) return false
+  var uuid = exact(check.uuid)
+  if (uuid === "" || exact(volume.uuid) === "") return false
+  if (exact(check.fsPath) === "" || exact(check.fsPath) !== exact(volume.fsPath)) return false
+  return uuid === exact(volume.uuid)
+}
+
+// The middle step of a rename or an fsck can succeed while putting the
+// filesystem back fails, and the drive is then sitting unmounted while the
+// panel says the thing worked. That is the one outcome the user has to act on,
+// so it travels back as its own exit code rather than being swallowed.
+var EXIT_REMOUNT_FAILED = 75
+
+function remountWarning(message) {
+  var done = clean(message)
+  if (done === "") return "The filesystem could not be mounted again"
+  return done + ", but it could not be mounted again"
+}
+
 function describeCheck(volume, consistent) {
   var name = volume ? volume.title : "the filesystem"
   if (consistent === true) return "No errors found on " + name

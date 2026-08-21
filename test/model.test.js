@@ -1135,5 +1135,62 @@ test("only the Apple hint asks for a reconnect", () => {
   assert.strictEqual(api.supportHint(api.parseSupport("usb 04a9,06 Canon\n")).reconnect, false)
 })
 
+console.log("\nrepair authorisation")
+
+const CHECKED = { fsPath: "/dev/sdb1", uuid: "1234-ABCD", verdict: false }
+const SAME = { fsPath: "/dev/sdb1", uuid: "1234-ABCD" }
+
+test("a repair is authorised for the filesystem that failed its check", () => {
+  assert.strictEqual(api.repairAuthorised(CHECKED, SAME), true)
+})
+
+test("swapping the drive for another on the same /dev node retracts it", () => {
+  const replacement = { fsPath: "/dev/sdb1", uuid: "9999-FFFF" }
+  assert.strictEqual(api.repairAuthorised(CHECKED, replacement), false,
+    "the kernel reuses /dev/sdb1, so the path alone would have repaired a drive nobody checked")
+})
+
+test("the same filesystem on a different node is not repaired either", () => {
+  const moved = { fsPath: "/dev/sdc1", uuid: "1234-ABCD" }
+  assert.strictEqual(api.repairAuthorised(CHECKED, moved), false,
+    "re-check it where it is now rather than acting on a stale pairing")
+})
+
+test("a filesystem with no UUID cannot be identified again, so it is refused", () => {
+  assert.strictEqual(api.repairAuthorised({ fsPath: "/dev/sdb1", uuid: "", verdict: false },
+                                          { fsPath: "/dev/sdb1", uuid: "" }), false)
+  assert.strictEqual(api.repairAuthorised(CHECKED, { fsPath: "/dev/sdb1", uuid: "" }), false)
+})
+
+test("only a check that actually failed authorises anything", () => {
+  for (const verdict of [true, null, undefined]) {
+    assert.strictEqual(api.repairAuthorised({ ...CHECKED, verdict }, SAME), false, String(verdict))
+  }
+})
+
+test("nothing checked authorises nothing", () => {
+  assert.strictEqual(api.repairAuthorised({ fsPath: "", uuid: "", verdict: false }, SAME), false)
+  assert.strictEqual(api.repairAuthorised(null, SAME), false)
+  assert.strictEqual(api.repairAuthorised(CHECKED, null), false)
+})
+
+console.log("\na filesystem left unmounted")
+
+test("the work that landed is still reported, with the part to act on", () => {
+  assert.strictEqual(api.remountWarning("Renamed STICK to BACKUP"),
+    "Renamed STICK to BACKUP, but it could not be mounted again")
+})
+
+test("an operation with no message of its own still says what went wrong", () => {
+  assert.strictEqual(api.remountWarning(""), "The filesystem could not be mounted again")
+  assert.strictEqual(api.remountWarning(null), "The filesystem could not be mounted again")
+})
+
+test("the remount failure has an exit code of its own, distinct from success", () => {
+  assert.strictEqual(api.EXIT_REMOUNT_FAILED, 75)
+  assert.notStrictEqual(api.EXIT_REMOUNT_FAILED, 0,
+    "swallowing it reported a drive as renamed while it sat unmounted")
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

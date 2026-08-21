@@ -550,7 +550,7 @@ Panel {
           // else — it exists only after a check has been run and only for the
           // volume that check was about.
           RowLayout {
-            visible: drives.checkedFsPath !== "" && drives.checkVerdict === false
+            visible: drives.repairOffered
             width: parent.width
             spacing: Style.space(8)
 
@@ -570,7 +570,7 @@ Panel {
               foreground: root.foreground
               hoverColor: root.urgent
               fontFamily: root.fontFamily
-              enabled: !drives.busy
+              enabled: !drives.busy && drives.repairOffered
                 && Model.canRepair(drives.fsCapabilities, drives.volumeByPath(drives.checkedFsPath))
               Layout.alignment: Qt.AlignVCenter
               onClicked: drives.repairVolume(drives.volumeByPath(drives.checkedFsPath))
