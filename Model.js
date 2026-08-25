@@ -39,6 +39,7 @@ var GLYPH_TAG = codepoint(0xF04F9)       // md-tag
 var GLYPH_STETHOSCOPE = codepoint(0xF04D9) // md-stethoscope
 var GLYPH_WRENCH = codepoint(0xF05B7)    // md-wrench
 var GLYPH_HEALTHY = codepoint(0xF05E0)   // md-check_circle
+var GLYPH_READONLY = codepoint(0xF0250)  // md-folder_lock
 
 // ------------------------------------------------------------ formatting
 
@@ -262,7 +263,9 @@ function parse(raw) {
 
 // ---------------------------------------------------------- presentation
 
-function volumeMeta(volume) {
+// readOnly is passed rather than read off the volume, because it comes from
+// /proc/mounts rather than from the lsblk tree the volume was built from.
+function volumeMeta(volume, readOnly) {
   if (!volume) return ""
   if (volume.encrypted && !volume.unlocked) return "Encrypted · " + formatBytes(volume.sizeBytes)
 
@@ -270,6 +273,9 @@ function volumeMeta(volume) {
   if (volume.fstypeLabel !== "") parts.push(volume.fstypeLabel)
 
   if (volume.mounted) {
+    // Ahead of the free space, because it changes what the drive is for: a
+    // read-only mount has room on it that cannot be used.
+    if (readOnly === true) parts.push("Read-only")
     if (volume.fsavail > 0) parts.push(formatBytes(volume.fsavail) + " free")
     else parts.push(formatBytes(volume.sizeBytes))
     if (volume.mountpoint !== "") parts.push(volume.mountpoint)
@@ -279,6 +285,43 @@ function volumeMeta(volume) {
     else if (volume.fstype !== "") parts.push("Not mountable")
   }
   return parts.join(" · ")
+}
+
+// ------------------------------------------------------- mount options
+//
+// Whether a filesystem is mounted read-only is not in the lsblk tree — its RO
+// column is the block device's own flag, not the mount's — so it is read from
+// /proc/mounts, the kernel's own answer.
+
+// /proc/mounts escapes space, tab, newline and backslash as three-digit octal.
+// A mount point is built from a device-chosen label and routinely contains a
+// space, so `/run/media/wian47/MY RESCUE` arrives as `MY\040RESCUE`. Comparing
+// the two without undoing that misses every drive whose label has a space in
+// it — which is most of the ones people name themselves.
+function unescapeMountPath(value) {
+  return String(value === undefined || value === null ? "" : value)
+    .replace(/\\([0-7]{3})/g, function(match, octal) {
+      return String.fromCharCode(parseInt(octal, 8))
+    })
+}
+
+function parseMountFlags(raw) {
+  var flags = {}
+  var lines = String(raw || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var fields = lines[i].split(" ")
+    if (fields.length < 4) continue
+    var options = fields[3].split(",")
+    // A later mount on the same point shadows an earlier one, so last wins.
+    flags[unescapeMountPath(fields[1])] = { readOnly: options.indexOf("ro") !== -1 }
+  }
+  return flags
+}
+
+function isReadOnly(flags, volume) {
+  if (!volume || !volume.mounted) return false
+  var entry = flags ? flags[exact(volume.mountpoint)] : null
+  return !!(entry && entry.readOnly)
 }
 
 function usedFraction(volume) {

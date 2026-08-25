@@ -288,6 +288,14 @@ Panel {
       return "unknown device: " + path
     }
 
+    // Mount without writing to the drive — for a filesystem that failed its
+    // check, or any drive worth reading before trusting.
+    function mountReadOnly(path: string): string {
+      var volume = drives.volumeByPath(path)
+      if (!volume) return "unknown volume: " + path
+      return drives.mountReadOnly(volume)
+    }
+
     // Rename the filesystem itself, addressed by the volume's own node
     // ("/dev/sdb1") rather than the drive's. An empty name clears the label.
     // Unlike `rename`, which only this shell ever sees, this writes to the
@@ -562,6 +570,20 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
+            }
+
+            // Offered before the wrench, and reads first, because it is the
+            // move that loses nothing: the panel tells you to copy your files
+            // off before repairing, and this is how you do that without
+            // writing to a filesystem that already failed its check.
+            PanelActionButton {
+              iconText: Model.GLYPH_READONLY
+              tooltipText: "Mount read-only so files can be copied off safely"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              enabled: !drives.busy && drives.repairOffered
+              Layout.alignment: Qt.AlignVCenter
+              onClicked: drives.mountReadOnly(drives.volumeByPath(drives.checkedFsPath))
             }
 
             PanelActionButton {
@@ -1073,7 +1095,7 @@ Panel {
               if (volumeRow.labelCheck && !volumeRow.labelCheck.ok) return volumeRow.labelCheck.message
               return "Enter renames the filesystem · Esc cancels"
             }
-            return volumeRow.working ? "Working…" : Model.volumeMeta(volumeRow.volume)
+            return volumeRow.working ? "Working…" : drives.metaFor(volumeRow.volume)
           }
           color: volumeRow.renamingLabel && volumeRow.labelCheck && !volumeRow.labelCheck.ok
             ? root.urgent : root.dim

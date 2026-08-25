@@ -1192,5 +1192,67 @@ test("the remount failure has an exit code of its own, distinct from success", (
     "swallowing it reported a drive as renamed while it sat unmounted")
 })
 
+console.log("\nmount options")
+
+const PROC_MOUNTS = [
+  "/dev/nvme0n1p2 / ext4 rw,relatime 0 0",
+  "/dev/sda1 /run/media/wian47/USB exfat rw,nosuid,nodev,relatime,uid=1000 0 0",
+  "/dev/sdb1 /run/media/wian47/MY\\040RESCUE vfat ro,nosuid,nodev,relatime 0 0",
+  ""
+].join("\n")
+
+const FLAGS = api.parseMountFlags(PROC_MOUNTS)
+
+test("a read-only mount is recognised as one", () => {
+  assert.strictEqual(FLAGS["/run/media/wian47/MY RESCUE"].readOnly, true)
+})
+
+test("a writable mount is not", () => {
+  assert.strictEqual(FLAGS["/run/media/wian47/USB"].readOnly, false)
+  assert.strictEqual(FLAGS["/"].readOnly, false)
+})
+
+test("the octal escaping in /proc/mounts is undone", () => {
+  assert.ok(FLAGS["/run/media/wian47/MY RESCUE"],
+    "lsblk reports the mount point with a real space; /proc/mounts writes MY\\040RESCUE, " +
+    "and a lookup that skips the unescaping misses every drive whose label has a space")
+  assert.strictEqual(FLAGS["/run/media/wian47/MY\\040RESCUE"], undefined,
+    "the escaped form must not be what ends up as the key")
+})
+
+test("tabs, newlines and backslashes come back too", () => {
+  assert.strictEqual(api.unescapeMountPath("/mnt/a\\040b"), "/mnt/a b")
+  assert.strictEqual(api.unescapeMountPath("/mnt/a\\011b"), "/mnt/a\tb")
+  assert.strictEqual(api.unescapeMountPath("/mnt/a\\134b"), "/mnt/a\\b")
+  assert.strictEqual(api.unescapeMountPath("/mnt/plain"), "/mnt/plain")
+})
+
+test("a later mount on the same point shadows the earlier one", () => {
+  const flags = api.parseMountFlags([
+    "/dev/sda1 /mnt vfat rw,relatime 0 0",
+    "/dev/sda1 /mnt vfat ro,relatime 0 0"
+  ].join("\n"))
+  assert.strictEqual(flags["/mnt"].readOnly, true, "the top of the stack is what you are looking at")
+})
+
+test("a volume is only read-only when it is actually mounted", () => {
+  const mounted = { mounted: true, mountpoint: "/run/media/wian47/MY RESCUE" }
+  const unmounted = { mounted: false, mountpoint: "" }
+  assert.strictEqual(api.isReadOnly(FLAGS, mounted), true)
+  assert.strictEqual(api.isReadOnly(FLAGS, unmounted), false)
+  assert.strictEqual(api.isReadOnly(FLAGS, null), false)
+  assert.strictEqual(api.isReadOnly({}, mounted), false)
+})
+
+test("the row says read-only ahead of the free space it cannot use", () => {
+  const volume = {
+    mounted: true, fstype: "vfat", fstypeLabel: "FAT32", encrypted: false,
+    fsavail: 1048576, sizeBytes: 2097152, mountpoint: "/mnt"
+  }
+  assert.match(api.volumeMeta(volume, true), /FAT32 · Read-only · 1\.0 MB free/)
+  assert.doesNotMatch(api.volumeMeta(volume, false), /Read-only/)
+  assert.doesNotMatch(api.volumeMeta(volume), /Read-only/, "the flag is optional and defaults off")
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

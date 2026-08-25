@@ -58,6 +58,11 @@ Item {
   // Per-drive settings the user has saved, keyed so they survive replugging.
   property var store: ({ version: 1, drives: {} })
 
+  // Mount options per mount point, straight from /proc/mounts — the kernel's
+  // own answer to "is this mounted read-only?", which the lsblk tree does not
+  // carry.
+  property var mountFlags: ({})
+
   // Bytes sitting in each mounted volume's trash, keyed by trash directory.
   property var trashSizes: ({})
   property string uid: ""
@@ -179,6 +184,15 @@ Item {
     if (lsblkProcess.running) return
     refreshing = true
     lsblkProcess.running = true
+    if (!mountsProcess.running) mountsProcess.running = true
+  }
+
+  function readOnlyFor(volume) {
+    return Model.isReadOnly(mountFlags, volume)
+  }
+
+  function metaFor(volume) {
+    return Model.volumeMeta(volume, readOnlyFor(volume))
   }
 
   // What the rescan button and `r` do. Unlike refresh(), it also forgets what
@@ -359,6 +373,42 @@ Item {
     if (force) command.push("--force")
     runAction(command, volume.fsPath, "unmount",
               (force ? "Force unmounted " : "Unmounted ") + volume.title)
+  }
+
+  // The rescue path out of a failed check. Repair rewrites the filesystem, so
+  // the honest first move on a drive that failed is to read what is still
+  // there without writing a byte to it — which the panel previously advised
+  // ("copy anything you still need off it first") without offering any way to
+  // do.
+  //
+  // A filesystem already mounted read-write has to come off first; there is no
+  // remount here, because changing the mount is the whole operation rather
+  // than a step on the way to one. If the read-only mount then fails, the
+  // drive is left unmounted and the error says so, which beats quietly putting
+  // it back writable.
+  function mountReadOnly(volume) {
+    if (!volume) return "unknown volume"
+    if (busy) return refuse("Another action is still running")
+    if (volume.encrypted && !volume.unlocked) return refuse("Unlock this volume first")
+    if (volume.mounted && readOnlyFor(volume)) {
+      actionStatus = volume.title + " is already mounted read-only"
+      return "unchanged"
+    }
+    if (!volume.mounted && !Model.isMountable(volume)) {
+      return refuse(describeFs(volume) + " cannot be mounted")
+    }
+    var blocked = fsActionBlocked(volume)
+    if (blocked !== "") return refuse(blocked)
+
+    var script = [
+      'set -u',
+      'dev=$1',
+      'if [ "$2" = 1 ]; then udisksctl unmount --no-user-interaction -b "$dev" >/dev/null || exit 1; fi',
+      'udisksctl mount --no-user-interaction -o ro -b "$dev" >/dev/null'
+    ].join("\n")
+    runAction(["bash", "-c", script, "removable-drives", volume.fsPath, volume.mounted ? "1" : "0"],
+              volume.fsPath, "mount-ro", "Mounted " + volume.title + " read-only")
+    return "ok"
   }
 
   function toggleMount(volume, openAfter) {
@@ -995,6 +1045,15 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.support = Model.parseSupport(text)
+    }
+  }
+
+  Process {
+    id: mountsProcess
+    command: ["cat", "/proc/mounts"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.mountFlags = Model.parseMountFlags(text)
     }
   }
 

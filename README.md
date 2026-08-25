@@ -31,6 +31,9 @@ and the bar goes back to what it was.
   machine that reads it. Each filesystem has its own ceiling — eleven
   characters on FAT32 and exFAT, sixteen on ext4 — and the field counts down
   against the right one as you type, rather than after a failed write.
+- **Mounts a suspect drive read-only**, so files can be copied off a
+  filesystem that failed its check without writing a byte back to it. The row
+  says `Read-only` while it is, read from `/proc/mounts` rather than guessed.
 - **Checks a filesystem, and repairs it only if you ask twice.** udisks runs
   the fsck; the panel unmounts the volume first and mounts it back afterwards,
   even if the check failed. Repair is the one thing here that rewrites a
@@ -89,6 +92,7 @@ originals are not on the device.
 | Phone row | click = browse (mounting on demand) |
 | 󰄠 󰝰 󰄝 | mount · open · unmount that volume |
 | 󰓹 󰓙 | rename the volume · check it for errors |
+| 󰉐 󰖷 | after a failed check: mount read-only · repair |
 | ⏏ ✏ | eject the drive (or cancel a held eject) · nickname it |
 | ⏏ in the header | eject every attached drive |
 
@@ -147,6 +151,7 @@ omarchy-shell removable-drives eject /dev/sdb                # or ejectAll
 omarchy-shell removable-drives rename /dev/sdb "Work backup" # "" clears it
 omarchy-shell removable-drives label /dev/sdb1 "Photos"      # the label on the drive
 omarchy-shell removable-drives check /dev/sdb1               # verdict lands in status
+omarchy-shell removable-drives mountReadOnly /dev/sdb1       # rescue without writing
 ```
 
 `status` reports `busy: true` while the kernel still has I/O in flight, so a
@@ -187,7 +192,7 @@ candidate of a mounted removable volume. The tests assert it refuses `/`,
 `$HOME`, the mount root, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 131 tests, no compositor required
+node test/model.test.js       # 138 tests, no compositor required
 omarchy plugin validate .     # the same check the shell applies
 ```
 
