@@ -1,0 +1,92 @@
+name: Tests
+
+# Model.js is pure parsing and formatting, so the rules that decide "is this
+# safe to eject?" can be checked without a compositor. Everything below runs in
+# seconds and exists because each failure it catches has actually happened.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  model:
+    name: Model tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+
+      # No package.json and no dependencies: the suite loads Model.js as source
+      # and evaluates it, so there is nothing to install.
+      - name: Run the model tests
+        run: node test/model.test.js
+
+      # The README has claimed 75, 116 and 122 tests on days when the suite had
+      # a different number. A count in the docs is a promise like any other.
+      - name: The README's test count matches the suite
+        run: |
+          count=$(node test/model.test.js | grep -c '  ok  ')
+          claimed=$(grep -oP '# \K[0-9]+(?= tests, no compositor)' README.md)
+          if [ "$count" != "$claimed" ]; then
+            echo "::error file=README.md::README claims $claimed tests, the suite has $count"
+            exit 1
+          fi
+          echo "$count tests, and the README says so"
+
+      - name: The manifest parses and still declares an id and a version
+        run: |
+          node -e '
+            const m = require("./manifest.json")
+            if (!m.id || !m.version) throw new Error("manifest is missing id or version")
+            console.log(m.id, m.version)
+          '
+
+      # The marketplace capability scan reads the repository as text. A `sudo`
+      # or `pacman` string — even inside a sentence saying the plugin does
+      # neither — is what held verification at review-required once already,
+      # and every one of them was documentation rather than code.
+      #
+      # .github is excluded because this step's own pattern would match itself.
+      - name: No strings that block marketplace verification
+        run: |
+          if grep -rn -E 'sudo|pkexec|doas|pacman' --exclude-dir=.git --exclude-dir=.github .; then
+            echo "::error::Found a privilege or package-manager string. The marketplace flags these as capabilities and they blocked verification once already; say it without the word."
+            exit 1
+          fi
+          echo "nothing the capability scan would flag"
+
+  qml:
+    name: QML syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install qmllint
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qt6-declarative-dev-tools
+
+      # Every `qs.*` import belongs to Omarchy's shell and cannot be resolved
+      # here, so qmllint prints warnings for both files by construction and
+      # still exits 0. A syntax error is what makes it exit non-zero — and it
+      # reports that as a `Warning: ... Syntax error [syntax]` line, so the
+      # exit code is the only reliable signal. Grepping for "Error" matches
+      # nothing qmllint ever writes and passes a file that does not parse.
+      - name: Panel.qml and Service.qml parse
+        run: |
+          export PATH=/usr/lib/qt6/bin:$PATH
+          status=0
+          for f in Panel.qml Service.qml; do
+            if ! qmllint "$f"; then
+              echo "::error file=$f::qmllint could not parse $f"
+              status=1
+            fi
+          done
+          exit $status
