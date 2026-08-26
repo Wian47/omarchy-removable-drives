@@ -3,7 +3,7 @@
 USB sticks, SD cards, phones, and external drives in the Omarchy bar — mount,
 open, and safely eject them without a terminal.
 
-![The panel: two USB drives with their volumes and free space, and a phone offering files and photos](preview.png?v=2)
+![The panel: three removable drives with their volumes, free space and per-volume actions, and a phone offering files](preview.png?v=3)
 
 The icon only exists while a drive does. Plug one in and it appears; pull it out
 and the bar goes back to what it was.
