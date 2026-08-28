@@ -40,6 +40,10 @@ and the bar goes back to what it was.
   filesystem, so it appears only after a check has actually found something —
   never one stray click from the mount button. When the tool for a filesystem
   is missing, udisks names it and the panel offers to install it.
+- **Unmounts before the machine sleeps**, optionally, so a drive pulled out of
+  a sleeping laptop is not left half-written. It holds a logind delay lock
+  while it works and releases it the moment it is done, so a machine with
+  nothing mounted still suspends immediately.
 - **Never offers to eject the disk you booted from.** A USB-booted system disk
   reports itself as removable just like a thumb drive; anything holding `/`,
   `/boot` or `/home` is left out entirely.
@@ -117,6 +121,7 @@ Setup > Plugins.
 | `alwaysShow` | `false` | Keep the icon in the bar with nothing attached |
 | `openOnMount` | `true` | Open the file manager once a volume mounts |
 | `notifications` | `true` | Announce drives, warn when one is pulled while mounted |
+| `unmountOnSuspend` | `false` | Unmount every removable volume when the machine suspends |
 | `fileManager` | `""` | Command used to open a mount point; empty means `xdg-open` |
 | `barLabel` | `"none"` | Text beside the icon: `none`, `free`, `name`, `count` |
 | `refreshIntervalSec` | `8` | How often free space is re-read while the panel is open |
@@ -136,6 +141,10 @@ drive:
   }
 }
 ```
+
+With `unmountOnSuspend` on, the list of volumes to unmount is kept in
+`~/.local/state/omarchy/removable-drives-suspend`, rewritten whenever the
+mounted set changes so it is never older than the last udev event.
 
 `onConnect` runs through `bash -c` when that drive appears, with `$1` as its
 device path and `$2` as its first mount point. Nothing writes it for you.
@@ -192,7 +201,7 @@ candidate of a mounted removable volume. The tests assert it refuses `/`,
 `$HOME`, the mount root, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 138 tests, no compositor required
+node test/model.test.js       # 147 tests, no compositor required
 omarchy plugin validate .     # the same check the shell applies
 ```
 

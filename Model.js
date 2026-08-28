@@ -532,6 +532,34 @@ function connectedSummary(device) {
 // The quiet-streak rule behind a deferred eject. Throughput dips to zero
 // between bursts of a copy, so a single idle sample does not mean the drive is
 // finished; only a run of them does.
+// The mirror of advanceQuiet, for the actions that refuse rather than defer.
+//
+// Every rename and check unmounts the filesystem and mounts it back, and that
+// metadata write lands as a single sample of I/O — measured at eight sectors,
+// gone by the next second. Refusing on one sample means the second of two
+// renames is turned away for writes that were the first rename's own, with a
+// message saying the drive is still being written to when nothing is writing.
+//
+// So: one quiet sample is not enough to call a copy finished, and one busy
+// sample is not enough to call one started. A copy stays busy for as long as
+// it runs.
+//
+// This is a courtesy check, not the safety net. udisks refuses to unmount a
+// filesystem that has open files, and the blockers strip names who is holding
+// it, so letting a marginal case through costs a clear error rather than an
+// interrupted copy.
+var BUSY_TICKS_BEFORE_REFUSING = 2
+
+function advanceBusy(previousTicks, busy) {
+  if (!busy) return 0
+  var n = Number(previousTicks)
+  return (isFinite(n) && n > 0 ? n : 0) + 1
+}
+
+function sustainedBusy(ticks) {
+  return (Number(ticks) || 0) >= BUSY_TICKS_BEFORE_REFUSING
+}
+
 function advanceQuiet(stillBusy, quietTicks, requiredTicks) {
   if (stillBusy) return { quietTicks: 0, run: false }
   var next = Number(quietTicks || 0) + 1
@@ -596,6 +624,28 @@ function parseSizes(raw) {
   for (var i = 0; i < lines.length; i++) {
     var match = lines[i].match(/^(\d+)[ \t]+(.+?)\r?$/)
     if (match) out[match[2]] = Number(match[1])
+  }
+  return out
+}
+
+// --------------------------------------------------------- sleep guard
+
+// What the sleep guard unmounts: mounted volumes only, by fsPath, because that
+// is what udisksctl takes.
+//
+// A /dev path can be reused, so this list is rewritten whenever the mounted
+// set changes and is never older than the last udev event. Unlike a repair,
+// an unmount aimed at a path that has moved on is harmless — it either finds
+// nothing mounted there, or finds a filesystem udisks refuses to unmount
+// without asking, which --no-user-interaction turns into a failure rather
+// than a surprise.
+function suspendTargets(devices) {
+  var out = []
+  for (var d = 0; d < (devices || []).length; d++) {
+    var volumes = devices[d].volumes || []
+    for (var v = 0; v < volumes.length; v++) {
+      if (volumes[v].mounted && exact(volumes[v].fsPath) !== "") out.push(exact(volumes[v].fsPath))
+    }
   }
   return out
 }

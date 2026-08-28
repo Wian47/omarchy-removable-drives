@@ -1254,5 +1254,74 @@ test("the row says read-only ahead of the free space it cannot use", () => {
   assert.doesNotMatch(api.volumeMeta(volume), /Read-only/, "the flag is optional and defaults off")
 })
 
+console.log("\ntelling a copy from our own remount")
+
+test("one busy sample is not a copy — it is the remount we just did", () => {
+  const ticks = api.advanceBusy(0, true)
+  assert.strictEqual(ticks, 1)
+  assert.strictEqual(api.sustainedBusy(ticks), false,
+    "renaming twice in a row was refused for writes the first rename itself caused")
+})
+
+test("two consecutive busy samples is a copy", () => {
+  let ticks = 0
+  ticks = api.advanceBusy(ticks, true)
+  ticks = api.advanceBusy(ticks, true)
+  assert.strictEqual(ticks, 2)
+  assert.strictEqual(api.sustainedBusy(ticks), true)
+})
+
+test("a quiet sample resets the tally, so bursts do not accumulate", () => {
+  let ticks = api.advanceBusy(api.advanceBusy(0, true), false)
+  assert.strictEqual(ticks, 0)
+  assert.strictEqual(api.sustainedBusy(api.advanceBusy(ticks, true)), false)
+})
+
+test("an unseen device has no tally and is not treated as busy", () => {
+  assert.strictEqual(api.sustainedBusy(undefined), false)
+  assert.strictEqual(api.sustainedBusy(null), false)
+  assert.strictEqual(api.advanceBusy(undefined, true), 1)
+})
+
+test("it is the same threshold eject already waits out, in reverse", () => {
+  assert.strictEqual(api.BUSY_TICKS_BEFORE_REFUSING, 2)
+  const step = api.advanceQuiet(false, 1, 2)
+  assert.strictEqual(step.run, true, "eject needs two quiet samples; this needs two busy ones")
+})
+
+console.log("\nwhat the sleep guard unmounts")
+
+test("only mounted volumes are targets", () => {
+  const devices = api.parse(tree([disk({ children: [
+    part({ mountpoint: "/run/media/wian47/A" }),
+    part({ name: "sdb2", path: "/dev/sdb2", mountpoint: null })
+  ] })]))
+  assert.deepStrictEqual(api.suspendTargets(devices), ["/dev/sdb1"])
+})
+
+test("every mounted volume across every drive is included", () => {
+  const devices = api.parse(tree([
+    disk({ children: [part({ mountpoint: "/run/media/wian47/A" })] }),
+    disk({ name: "sdc", path: "/dev/sdc",
+           children: [part({ name: "sdc1", path: "/dev/sdc1", mountpoint: "/run/media/wian47/B" })] })
+  ]))
+  assert.deepStrictEqual(api.suspendTargets(devices), ["/dev/sdb1", "/dev/sdc1"])
+})
+
+test("an unlocked LUKS volume is unmounted by its mapper node, not the partition", () => {
+  const devices = api.parse(tree([disk({ children: [part({
+    fstype: "crypto_LUKS", label: null,
+    children: [{ name: "luks-x", path: "/dev/mapper/luks-x", type: "crypt", fstype: "ext4",
+                 label: "VAULT", mountpoint: "/run/media/wian47/VAULT", children: [] }]
+  })] })]))
+  assert.deepStrictEqual(api.suspendTargets(devices), ["/dev/mapper/luks-x"],
+    "udisksctl unmount takes the filesystem's node, which for LUKS is the mapper device")
+})
+
+test("nothing mounted means nothing to unmount", () => {
+  assert.deepStrictEqual(api.suspendTargets([]), [])
+  assert.deepStrictEqual(api.suspendTargets(null), [])
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

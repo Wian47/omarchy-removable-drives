@@ -127,11 +127,20 @@ Item {
 
   readonly property bool notificationsEnabled: setting("notifications", true) === true
 
+  // Off by default: unmounting on the way into sleep is the right thing for
+  // someone who carries a drive around, and the wrong thing for someone who
+  // suspends with a backup half-written and expects it there on resume.
+  readonly property bool unmountOnSuspend: setting("unmountOnSuspend", false) === true
+
   property string _successMessage: ""
   property string _stdout: ""
   property string _stderr: ""
   property string _openAfterPath: ""
   property var _statSamples: ({})
+
+  // Consecutive samples each device has read busy, so a one-sample blip — the
+  // remount every rename and check performs — is not mistaken for a copy.
+  property var _busyTicks: ({})
   property var _previousDevices: []
   property var _expectedRemovals: ({})
   property bool _seenFirstSnapshot: false
@@ -229,6 +238,7 @@ Item {
 
     if (watchClosely) probeTrash()
     probeCapabilities()
+    updateSuspendTargets()
 
     // A mount requested with "open after mounting" only knows where the
     // filesystem landed once the next snapshot comes back with a mount point.
@@ -296,6 +306,16 @@ Item {
     var built = Model.buildActivity(_statSamples, Model.parseBlockStats(raw), Date.now())
     activity = built.activity
     _statSamples = built.samples
+
+    // Rebuilt from the live device list, so a drive that has gone takes its
+    // tally with it rather than lingering as a name nobody looks up.
+    var ticks = {}
+    for (var i = 0; i < devices.length; i++) {
+      var name = devices[i].name
+      var entry = built.activity[name]
+      ticks[name] = Model.advanceBusy(_busyTicks[name], !!(entry && entry.busy))
+    }
+    _busyTicks = ticks
     advancePendingEject()
   }
 
@@ -500,6 +520,100 @@ Item {
     if (!volume || !volume.mounted) return
     Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation",
                              "cd " + quote(volume.mountpoint) + " && exec $SHELL"])
+  }
+
+  // ------------------------------------------------------- sleep guard
+  //
+  // Closing the lid with a drive mounted and pulling it out later is the same
+  // way of losing files this widget exists to prevent, and nothing else on the
+  // system stops it. logind will wait for a delay inhibitor before suspending
+  // — up to InhibitDelayMaxSec, fifteen seconds here — which is far longer
+  // than unmounting takes.
+  //
+  // The lock is released as soon as the unmounting is done, so a machine with
+  // nothing mounted suspends as promptly as it did before. Re-arming waits for
+  // the resume signal rather than happening immediately, so a fresh delay lock
+  // can never land in the middle of the suspend it was just told about.
+
+  readonly property string suspendTargetsPath:
+    Quickshell.env("HOME") + "/.local/state/omarchy/removable-drives-suspend"
+
+  property string _suspendSignature: ""
+
+  // The guard is a shell loop rather than QML because the unmounting has to
+  // finish while the lock is still held; a Process started from here would
+  // return long before that, and the lock would be gone.
+  readonly property string suspendScript: [
+    'set -u',
+    'targets=$1',
+    // systemd-inhibit holds the lock as an fd, so logind drops it the moment
+    // that process dies — but only if it actually dies. Killing this script
+    // leaves it reparented to init, still holding a delay lock that nothing
+    // will ever release, and every shell restart leaks another one until
+    // suspend waits the full fifteen seconds every time.
+    'inhibit_pid=""',
+    // A trap covers a polite shutdown. It cannot cover SIGKILL, which is what
+    // a shell restart actually delivers — and the inhibitor, reparented to
+    // init, then holds a delay lock nothing will release. So the guard also
+    // records its inhibitor's pid and reaps the previous one on the way in.
+    // /proc is consulted rather than a name pattern, because this script's own
+    // command line contains every string a pattern would match.
+    'guardfile=$2',
+    'reap_stale() {',
+    '  [ -r "$guardfile" ] || return 0',
+    '  old=$(cat "$guardfile" 2>/dev/null)',
+    '  case "$old" in ""|*[!0-9]*) return 0 ;; esac',
+    '  case "$(tr -d \'\\000\' < /proc/$old/cmdline 2>/dev/null)" in',
+    '    systemd-inhibit*) kill "$old" 2>/dev/null ;;',
+    '  esac',
+    '}',
+    'reap_stale',
+    'cleanup() {',
+    '  [ -n "${inhibit_pid:-}" ] && kill "$inhibit_pid" 2>/dev/null',
+    '  [ -n "${MONITOR_PID:-}" ] && kill "$MONITOR_PID" 2>/dev/null',
+    '  exit 0',
+    '}',
+    'trap cleanup EXIT INT TERM HUP',
+    'wait_for_sleep_signal() {',
+    '  coproc MONITOR { gdbus monitor --system --dest org.freedesktop.login1' +
+      ' --object-path /org/freedesktop/login1; }',
+    '  while IFS= read -r line <&"${MONITOR[0]}"; do',
+    '    case "$line" in *"PrepareForSleep ($1,)"*) break ;; esac',
+    '  done',
+    '  kill "$MONITOR_PID" 2>/dev/null',
+    '  wait "$MONITOR_PID" 2>/dev/null',
+    '}',
+    'unmount_targets() {',
+    '  [ -r "$1" ] || return 0',
+    '  while IFS= read -r dev; do',
+    '    [ -n "$dev" ] || continue',
+    '    udisksctl unmount --no-user-interaction -b "$dev" >/dev/null 2>&1 || true',
+    '  done < "$1"',
+    '}',
+    'export -f wait_for_sleep_signal unmount_targets',
+    'while true; do',
+    '  systemd-inhibit --what=sleep --mode=delay --who="Removable Drives"' +
+      ' --why="Unmounting removable drives" \\',
+    "    bash -c 'wait_for_sleep_signal true; unmount_targets \"$1\"' removable-drives \"$targets\" &",
+    '  inhibit_pid=$!',
+    '  printf %s "$inhibit_pid" > "$guardfile"',
+    '  wait "$inhibit_pid"',
+    '  inhibit_pid=""',
+    '  wait_for_sleep_signal false',
+    'done'
+  ].join("\n")
+
+  // Rewritten only when the mounted set changes, so a drive appearing or going
+  // quiet does not cost a write.
+  function updateSuspendTargets() {
+    if (!unmountOnSuspend) return
+    var text = Model.suspendTargets(devices).join("\n")
+    if (text === _suspendSignature) return
+    _suspendSignature = text
+    suspendWriter.command = ["bash", "-c",
+                             'mkdir -p "$(dirname "$2")" && printf %s "$1" > "$2"',
+                             "removable-drives", text, suspendTargetsPath]
+    suspendWriter.running = true
   }
 
   // -------------------------------------------------- per-drive memory
@@ -714,7 +828,7 @@ Item {
   function fsActionBlocked(volume) {
     if (!volume) return "No volume selected"
     var device = deviceOfVolume(volume)
-    if (device && isDeviceBusy(device)) {
+    if (device && Model.sustainedBusy(_busyTicks[device.name])) {
       return device.title + " is still being written to — try again once it settles"
     }
     return ""
@@ -1046,6 +1160,17 @@ Item {
       waitForEnd: true
       onStreamFinished: root.support = Model.parseSupport(text)
     }
+  }
+
+  Process {
+    id: suspendWriter
+  }
+
+  Process {
+    id: suspendGuard
+    command: ["bash", "-c", root.suspendScript, "removable-drives",
+              root.suspendTargetsPath, root.suspendTargetsPath + ".guard"]
+    running: root.unmountOnSuspend
   }
 
   Process {

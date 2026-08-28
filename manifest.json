@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "wian47.removable-drives",
   "name": "Removable Drives",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "author": "Wian Schoeman",
   "license": "MIT",
   "homepage": "https://github.com/Wian47/omarchy-removable-drives",
@@ -23,6 +23,7 @@
       "alwaysShow": false,
       "openOnMount": true,
       "notifications": true,
+      "unmountOnSuspend": false,
       "fileManager": "",
       "refreshIntervalSec": 8,
       "barLabel": "none"
@@ -34,6 +35,13 @@
         "label": "Notify on connect and remove",
         "defaultValue": true,
         "description": "Announce drives as they are plugged in, and warn when one is unplugged while still mounted."
+      },
+      {
+        "key": "unmountOnSuspend",
+        "type": "boolean",
+        "label": "Unmount drives before sleep",
+        "defaultValue": false,
+        "description": "Unmount every removable volume when the machine suspends, so a drive unplugged while it sleeps is not left half-written."
       },
       {
         "key": "barLabel",
