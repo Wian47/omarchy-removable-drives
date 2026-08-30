@@ -1323,5 +1323,31 @@ test("nothing mounted means nothing to unmount", () => {
   assert.deepStrictEqual(api.suspendTargets(null), [])
 })
 
+console.log("\nunlocking")
+
+test("the cleartext device is read out of what udisksctl says", () => {
+  assert.strictEqual(api.parseUnlockedMapper("Unlocked /dev/sdb1 as /dev/dm-0.\n"), "/dev/dm-0")
+})
+
+test("a mapper name containing a dot survives the trailing full stop", () => {
+  assert.strictEqual(
+    api.parseUnlockedMapper("Unlocked /dev/sdb1 as /dev/mapper/luks-a.b.\n"),
+    "/dev/mapper/luks-a.b",
+    "the period is the sentence ending, not a delimiter")
+})
+
+test("an answer that names no device yields nothing rather than a guess", () => {
+  for (const raw of ["", "\n", "Error unlocking", "Unlocked /dev/sdb1"]) {
+    assert.strictEqual(api.parseUnlockedMapper(raw), "", JSON.stringify(raw))
+  }
+})
+
+test("only a locked encrypted volume can be unlocked", () => {
+  assert.strictEqual(api.canUnlock({ encrypted: true, unlocked: false }), true)
+  assert.strictEqual(api.canUnlock({ encrypted: true, unlocked: true }), false)
+  assert.strictEqual(api.canUnlock({ encrypted: false, unlocked: false }), false)
+  assert.strictEqual(api.canUnlock(null), false)
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

@@ -628,6 +628,29 @@ function parseSizes(raw) {
   return out
 }
 
+// ------------------------------------------------------------- unlocking
+
+// udisksctl answers an unlock with "Unlocked /dev/sdb1 as /dev/dm-0." and the
+// cleartext device is the half that matters: udisks refuses the backing
+// partition for mount and unmount alike — "is not a mountable filesystem" —
+// so every filesystem operation after an unlock has to name the mapper.
+//
+// The trailing period is part of the sentence, not the path, and a mapper name
+// can itself contain one, so it is stripped from the end rather than used as a
+// delimiter.
+function parseUnlockedMapper(raw) {
+  var lines = String(raw === undefined || raw === null ? "" : raw).split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var match = lines[i].match(/\bas\s+(\/dev\/.+?)\.?\s*$/)
+    if (match) return match[1]
+  }
+  return ""
+}
+
+function canUnlock(volume) {
+  return !!(volume && volume.encrypted && !volume.unlocked)
+}
+
 // --------------------------------------------------------- sleep guard
 
 // What the sleep guard unmounts: mounted volumes only, by fsPath, because that

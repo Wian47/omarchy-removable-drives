@@ -133,6 +133,10 @@ Item {
   readonly property bool unmountOnSuspend: setting("unmountOnSuspend", false) === true
 
   property string _successMessage: ""
+
+  // A LUKS passphrase on its way to a process, held only between building the
+  // command and the process starting, and cleared the moment it is written.
+  property string _secret: ""
   property string _stdout: ""
   property string _stderr: ""
   property string _openAfterPath: ""
@@ -361,8 +365,9 @@ Item {
 
   // ------------------------------------------------------------- actions
 
-  function runAction(command, path, action, successMessage) {
+  function runAction(command, path, action, successMessage, secret) {
     if (actionProcess.running) return
+    _secret = secret === undefined || secret === null ? "" : secret
     lastError = ""
     actionStatus = ""
     blockers = []
@@ -443,13 +448,44 @@ Item {
     if (volume) unmount(volume, true)
   }
 
-  // Unlocking needs a passphrase, and a bar popup is the wrong place to
-  // collect one — hand it to udisksctl in a terminal, which already knows how
-  // to prompt safely, and let the udev watcher pick up the result.
-  function unlock(volume) {
-    if (!volume || !volume.encrypted || volume.unlocked) return
-    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation",
-                             "udisksctl unlock -b " + quote(volume.path)])
+  // udisksctl reads a key only from a file, never from stdin, so the
+  // passphrase has to land on disk somewhere. XDG_RUNTIME_DIR is tmpfs — it
+  // never reaches persistent storage — the file is created under umask 077,
+  // and a trap removes it however the script ends.
+  //
+  // The passphrase reaches the script on stdin rather than as an argument,
+  // because /proc/<pid>/cmdline is readable by every other process this user
+  // runs, and a passphrase in argv is a passphrase in `ps`.
+  //
+  // udisks refuses the backing partition for mount and unmount alike, so the
+  // mount that follows targets the mapper udisksctl names on its way out.
+  readonly property string unlockScript: [
+    'set -u',
+    'dev=$1',
+    'keyfile="${XDG_RUNTIME_DIR:-/dev/shm}/removable-drives.$$.key"',
+    "trap 'rm -f \"$keyfile\"' EXIT INT TERM",
+    'umask 077',
+    'IFS= read -r pass',
+    'printf %s "$pass" > "$keyfile"',
+    'unset pass',
+    'out=$(udisksctl unlock --no-user-interaction -b "$dev" --key-file "$keyfile") || exit 1',
+    'printf "%s\\n" "$out"',
+    'mapper=${out##* as }',
+    'mapper=${mapper%.}',
+    'case "$mapper" in',
+    '  /dev/*) udisksctl mount --no-user-interaction -b "$mapper" >/dev/null ;;',
+    '  *) echo "udisks did not say which device it unlocked" >&2; exit 1 ;;',
+    'esac'
+  ].join("\n")
+
+  function unlock(volume, passphrase) {
+    if (!Model.canUnlock(volume)) return "This volume is not locked"
+    if (busy) return refuse("Another action is still running")
+    if (String(passphrase || "") === "") return refuse("Enter the passphrase first")
+    runAction(["bash", "-c", unlockScript, "removable-drives", volume.path],
+              volume.fsPath, "unlock", "Unlocked " + volume.title,
+              String(passphrase))
+    return "ok"
   }
 
   // Ejecting a drive the kernel is still writing to is exactly the mistake
@@ -564,12 +600,17 @@ Item {
     '  old=$(cat "$guardfile" 2>/dev/null)',
     '  case "$old" in ""|*[!0-9]*) return 0 ;; esac',
     '  case "$(tr -d \'\\000\' < /proc/$old/cmdline 2>/dev/null)" in',
-    '    systemd-inhibit*) kill "$old" 2>/dev/null ;;',
+    // The whole group, not just the inhibitor. systemd-inhibit spawns the
+    // process that waits for the signal, and killing only the parent leaves
+    // that child alive — reparented, still holding a gdbus monitor, blocked
+    // on a read that will never return. The lock was freed and nineteen
+    // monitors were not.
+    '    systemd-inhibit*) kill -- -"$old" 2>/dev/null ;;',
     '  esac',
     '}',
     'reap_stale',
     'cleanup() {',
-    '  [ -n "${inhibit_pid:-}" ] && kill "$inhibit_pid" 2>/dev/null',
+    '  [ -n "${inhibit_pid:-}" ] && kill -- -"$inhibit_pid" 2>/dev/null',
     '  [ -n "${MONITOR_PID:-}" ] && kill "$MONITOR_PID" 2>/dev/null',
     '  exit 0',
     '}',
@@ -592,7 +633,10 @@ Item {
     '}',
     'export -f wait_for_sleep_signal unmount_targets',
     'while true; do',
-    '  systemd-inhibit --what=sleep --mode=delay --who="Removable Drives"' +
+    // setsid so the inhibitor leads its own process group: that is what makes
+    // the whole tree killable as one, rather than by name — and this script's
+    // own command line contains every name a pattern would match.
+    '  setsid systemd-inhibit --what=sleep --mode=delay --who="Removable Drives"' +
       ' --why="Unmounting removable drives" \\',
     "    bash -c 'wait_for_sleep_signal true; unmount_targets \"$1\"' removable-drives \"$targets\" &",
     '  inhibit_pid=$!',
@@ -1098,6 +1142,15 @@ Item {
 
   Process {
     id: actionProcess
+    // Only the unlock script ever reads stdin; for everything else the pipe is
+    // opened and never written, which no command here notices.
+    stdinEnabled: true
+    onStarted: {
+      if (root._secret !== "") {
+        write(root._secret + "\n")
+        root._secret = ""
+      }
+    }
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root._stdout = text }
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: root._stderr = text }
     onExited: function(exitCode) {

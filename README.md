@@ -31,6 +31,12 @@ and the bar goes back to what it was.
   machine that reads it. Each filesystem has its own ceiling — eleven
   characters on FAT32 and exFAT, sixteen on ext4 — and the field counts down
   against the right one as you type, rather than after a failed write.
+- **Unlocks an encrypted volume in place.** The passphrase is typed into the
+  row, reaches udisks on stdin rather than as an argument — `/proc/<pid>/cmdline`
+  is readable by every other process you run — and the filesystem is mounted as
+  soon as the container opens. udisksctl takes a key only from a file, so it is
+  staged under `umask 077` in the RAM-backed runtime directory and removed by a
+  trap however the unlock ends.
 - **Mounts a suspect drive read-only**, so files can be copied off a
   filesystem that failed its check without writing a byte back to it. The row
   says `Read-only` while it is, read from `/proc/mounts` rather than guessed.
@@ -48,7 +54,7 @@ and the bar goes back to what it was.
   reports itself as removable just like a thumb drive; anything holding `/`,
   `/boot` or `/home` is left out entirely.
 - Plus: connect and remove notifications, a warning when a drive is pulled
-  while still mounted, encrypted volumes unlocked through a terminal, free
+  while still mounted, free
   space bars, eject-all, and optional text beside the bar icon.
 
 ## Install
@@ -97,6 +103,7 @@ originals are not on the device.
 | 󰄠 󰝰 󰄝 | mount · open · unmount that volume |
 | 󰓹 󰓙 | rename the volume · check it for errors |
 | 󰉐 󰖷 | after a failed check: mount read-only · repair |
+| 󰌾 | locked volume: type the passphrase to unlock and mount |
 | ⏏ ✏ | eject the drive (or cancel a held eject) · nickname it |
 | ⏏ in the header | eject every attached drive |
 
@@ -201,7 +208,7 @@ candidate of a mounted removable volume. The tests assert it refuses `/`,
 `$HOME`, the mount root, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 147 tests, no compositor required
+node test/model.test.js       # 151 tests, no compositor required
 omarchy plugin validate .     # the same check the shell applies
 ```
 

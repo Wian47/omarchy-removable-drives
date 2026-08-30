@@ -50,6 +50,11 @@ Panel {
   // machine that reads the drive.
   property string renamingLabelPath: ""
 
+  // fsPath of the locked volume whose passphrase is being typed, "" when none
+  // is. Never holds the passphrase itself — that lives in the field until it
+  // is handed to the process, and is cleared the moment it is.
+  property string unlockingPath: ""
+
   readonly property var devices: drives.devices
   readonly property var rows: Model.navRows(drives.devices, drives.portables)
   property int cursor: 0
@@ -156,6 +161,18 @@ Panel {
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
+  function beginUnlock(volume) {
+    if (!volume || !Model.canUnlock(volume)) return
+    renamingKey = ""
+    renamingLabelPath = ""
+    unlockingPath = volume.fsPath
+  }
+
+  function finishUnlock() {
+    unlockingPath = ""
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
   function beginLabelEdit(volume) {
     if (!volume || !Model.canRelabel(volume)) return
     renamingKey = ""
@@ -173,7 +190,7 @@ Panel {
   function activateVolume(volume) {
     if (!volume) return
     if (volume.mounted) drives.openVolume(volume)
-    else if (volume.encrypted && !volume.unlocked) drives.unlock(volume)
+    else if (Model.canUnlock(volume)) beginUnlock(volume)
     else drives.mount(volume, openOnMount)
   }
 
@@ -229,11 +246,24 @@ Panel {
       }
       if (!volumeHere) renamingLabelPath = ""
     }
+    // An unlock replaces the locked volume with its mapper, so the row this
+    // field belongs to is gone the moment it succeeds.
+    if (unlockingPath !== "") {
+      var lockedHere = false
+      for (i = 0; i < devices.length; i++) {
+        for (var u = 0; u < devices[i].volumes.length; u++) {
+          var candidate = devices[i].volumes[u]
+          if (candidate.fsPath === unlockingPath && Model.canUnlock(candidate)) lockedHere = true
+        }
+      }
+      if (!lockedHere) unlockingPath = ""
+    }
   }
   onOpenedChanged: {
     drives.watchClosely = opened
     renamingKey = ""
     renamingLabelPath = ""
+    unlockingPath = ""
     if (opened) {
       cursorActive = false
       cursor = 0
@@ -393,6 +423,7 @@ Panel {
       // While a nickname or a label is being typed, every keystroke belongs to
       // the text field rather than to the cursor.
       blocked: root.renamingKey !== "" || root.renamingLabelPath !== ""
+        || root.unlockingPath !== ""
 
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) {
@@ -977,6 +1008,7 @@ Panel {
     readonly property real trashBytes: volume ? drives.trashSizeFor(volume) : 0
 
     readonly property bool renamingLabel: volume && root.renamingLabelPath === volume.fsPath
+    readonly property bool unlocking: volume && root.unlockingPath === volume.fsPath
     readonly property bool canCheck: volume && Model.canCheck(drives.fsCapabilities, volume)
     readonly property var checkHint: volume ? Model.checkHint(drives.fsCapabilities, volume) : null
 
@@ -998,6 +1030,19 @@ Panel {
     }
 
     function cancelLabel() { root.finishLabelEdit() }
+
+    // The passphrase goes straight to the service and the field is emptied in
+    // the same breath, so it never lingers in a property the panel keeps.
+    function commitUnlock(value) {
+      drives.unlock(volumeRow.volume, value)
+      passphraseField.text = ""
+      root.finishUnlock()
+    }
+
+    function cancelUnlock() {
+      passphraseField.text = ""
+      root.finishUnlock()
+    }
 
     hasCursor: selected
     foreground: root.foreground
@@ -1040,7 +1085,7 @@ Panel {
 
         Text {
           textFormat: Text.PlainText
-          visible: !volumeRow.renamingLabel
+          visible: !volumeRow.renamingLabel && !volumeRow.unlocking
           Layout.fillWidth: true
           text: volumeRow.volume ? volumeRow.volume.title : ""
           color: volumeRow.volume && volumeRow.volume.mounted ? root.foreground : Qt.darker(root.foreground, 1.25)
@@ -1087,10 +1132,29 @@ Panel {
           }
         }
 
+        // Unlocking in place rather than in a terminal. The passphrase reaches
+        // udisks on stdin and is never an argument, so it stays out of `ps`.
+        TextField {
+          id: passphraseField
+          visible: volumeRow.unlocking
+          Layout.fillWidth: true
+          password: true
+          foreground: root.foreground
+          verticalPadding: Style.space(2)
+          placeholderText: "Passphrase"
+          onVisibleChanged: if (visible) {
+            text = ""
+            Qt.callLater(function() { passphraseField.forceActiveFocus() })
+          }
+          onAccepted: volumeRow.commitUnlock(text)
+          Keys.onEscapePressed: volumeRow.cancelUnlock()
+        }
+
         Text {
           textFormat: Text.PlainText
           Layout.fillWidth: true
           text: {
+            if (volumeRow.unlocking) return "Enter unlocks and mounts · Esc cancels"
             if (volumeRow.renamingLabel) {
               if (volumeRow.labelCheck && !volumeRow.labelCheck.ok) return volumeRow.labelCheck.message
               return "Enter renames the filesystem · Esc cancels"
@@ -1230,7 +1294,7 @@ Panel {
         tooltipText: {
           if (!volumeRow.volume) return ""
           if (volumeRow.volume.mounted) return "Unmount"
-          if (volumeRow.volume.encrypted && !volumeRow.volume.unlocked) return "Unlock in a terminal"
+          if (Model.canUnlock(volumeRow.volume)) return "Unlock — type the passphrase here"
           return "Mount"
         }
         foreground: root.foreground
@@ -1238,7 +1302,10 @@ Panel {
         enabled: !drives.busy
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex)) }
-        onClicked: drives.toggleMount(volumeRow.volume, root.openOnMount)
+        onClicked: {
+          if (Model.canUnlock(volumeRow.volume)) root.beginUnlock(volumeRow.volume)
+          else drives.toggleMount(volumeRow.volume, root.openOnMount)
+        }
       }
     }
   }
