@@ -1,6 +1,6 @@
 # Removable Drives
 
-USB sticks, SD cards, phones, and external drives in the Omarchy bar — mount,
+USB sticks, SD cards, phones, and external drives in the Omarchy bar: mount,
 open, and safely eject them without a terminal.
 
 ![The panel: three removable drives with their volumes, free space and per-volume actions, and a phone offering files](preview.png?v=3)
@@ -10,57 +10,40 @@ and the bar goes back to what it was.
 
 ## What it does
 
-- **Mount, open, and eject** any removable volume without a password — udisks2
-  already lets the logged-in session do it. Ejecting unmounts every volume on
-  the drive, re-locks anything encrypted, then powers it down.
+- **Mount, open, and eject** any removable volume without a password, because
+  udisks2 already lets the logged-in session do it. Ejecting unmounts every
+  volume on the drive, re-locks anything encrypted, then powers it down.
 - **Knows when the drive is still being written to.** The icon turns urgent
   while the kernel has I/O in flight and the panel shows the live rate, because
   a copy dialog reaching 100% is not the moment a stick is safe to pull. An
   eject asked for mid-copy is held, then fires once the drive goes quiet.
 - **Names who is holding a busy mount**, instead of stopping at `target is
   busy`, and offers a lazy unmount as an explicit second choice.
-- **Phones and cameras** get their own section — Android over MTP, iPhone over
-  AFC and PTP — with their access labelled `Files` or `Photos`.
-- **Nicknames stick to the hardware.** They are keyed to the drive's serial,
-  not to whichever `/dev/sdb` it landed on today. A drive can also run a
-  command of your choosing when it appears.
-- **Empties the trash you cannot see** — the `.Trash-1000` that quietly fills a
+- **Phones and cameras** get their own section: Android over MTP, iPhone over
+  AFC and PTP, with their access labelled `Files` or `Photos`.
+- **Unlocks an encrypted volume in place**, mounts it as the container opens,
+  and closes it again from the same row without ejecting the drive.
+- **Renames the volume label.** It travels with the stick to every machine
+  that reads it, unlike a nickname, which never leaves this shell. The field
+  counts down against that filesystem's own limit as you type.
+- **Checks a filesystem, and repairs it only if you ask twice.** Repair is the
+  one thing here that rewrites a filesystem, so it appears only after a check
+  has found something, never one stray click from the mount button. A suspect
+  drive mounts read-only first, so files come off without a byte going back.
+- **Unmounts before the machine sleeps**, optionally, so a drive pulled from a
+  sleeping laptop is not left half-written, and says which one refused when
+  one does.
+- **Nicknames stick to the hardware**, keyed to the drive's serial rather than
+  whichever `/dev/sdb` it landed on today. A drive can also run a command of
+  your choosing when it appears.
+- **Empties the trash you cannot see**: the `.Trash-1000` that quietly fills a
   stick with files you thought were deleted.
-- **Renames the drive itself.** A nickname is private to this shell; the volume
-  label is written to the filesystem and travels with the stick to every other
-  machine that reads it. Each filesystem has its own ceiling — eleven
-  characters on FAT32 and exFAT, sixteen on ext4 — and the field counts down
-  against the right one as you type, rather than after a failed write.
-- **Unlocks an encrypted volume in place.** The passphrase is typed into the
-  row, reaches udisks on stdin rather than as an argument — `/proc/<pid>/cmdline`
-  is readable by every other process you run — and the filesystem is mounted as
-  soon as the container opens. udisksctl takes a key only from a file, so it is
-  staged under `umask 077` in the RAM-backed runtime directory and removed by a
-  trap however the unlock ends. An open container closes again from the same
-  row — unmounting what is inside it first — without ejecting the whole drive.
-
-  With `unmountOnSuspend` on, a volume that refuses to unmount before sleep is
-  reported rather than passed over: being told your drives were parked when
-  they were not is worse than not being offered the feature.
-- **Mounts a suspect drive read-only**, so files can be copied off a
-  filesystem that failed its check without writing a byte back to it. The row
-  says `Read-only` while it is, read from `/proc/mounts` rather than guessed.
-- **Checks a filesystem, and repairs it only if you ask twice.** udisks runs
-  the fsck; the panel unmounts the volume first and mounts it back afterwards,
-  even if the check failed. Repair is the one thing here that rewrites a
-  filesystem, so it appears only after a check has actually found something —
-  never one stray click from the mount button. When the tool for a filesystem
-  is missing, udisks names it and the panel offers to install it.
-- **Unmounts before the machine sleeps**, optionally, so a drive pulled out of
-  a sleeping laptop is not left half-written. It holds a logind delay lock
-  while it works and releases it the moment it is done, so a machine with
-  nothing mounted still suspends immediately.
 - **Never offers to eject the disk you booted from.** A USB-booted system disk
   reports itself as removable just like a thumb drive; anything holding `/`,
   `/boot` or `/home` is left out entirely.
 - Plus: connect and remove notifications, a warning when a drive is pulled
-  while still mounted, free
-  space bars, eject-all, and optional text beside the bar icon.
+  while still mounted, free-space bars, eject-all, and optional text beside the
+  bar icon.
 
 ## Install
 
@@ -70,7 +53,7 @@ omarchy plugin add https://github.com/Wian47/omarchy-removable-drives.git --enab
 
 Needs Omarchy 4 (Quattro) and `udisks2`, both standard. It calls `lsblk`,
 `udevadm`, `udisksctl`, `busctl`, `gio`, `fuser`, `du`, `wl-copy` and Omarchy's
-own `omarchy-*` helpers — nothing runs as root.
+own `omarchy-*` helpers. Nothing runs as root.
 
 To remove it:
 
@@ -88,15 +71,13 @@ Omarchy ships `gvfs-mtp`, so **Android works out of the box**. Apple devices
 speak AFC and need three packages Omarchy does not ship: `usbmuxd`, `gvfs-afc`
 and `gvfs-gphoto2`.
 
-A plugin may not install packages itself — Omarchy's own installer is the only
-thing that may, and it asks first — so when something is plugged in that gvfs
-cannot reach, the panel names the missing packages and offers to open that
-installer for them.
+A plugin may not install packages itself, so when something is plugged in that
+gvfs cannot reach, the panel names what is missing and offers to open Omarchy's
+own installer.
 
 A trusted iPhone appears as **two** entries: app documents over AFC, and the
-camera roll over PTP. Apple limits both, and with iCloud Photos set to
-"Optimize iPhone Storage" the camera roll can read as empty because the
-originals are not on the device.
+camera roll over PTP. With iCloud Photos set to "Optimize iPhone Storage" the
+camera roll can read as empty, because the originals are not on the device.
 
 ## Using it
 
@@ -154,10 +135,6 @@ drive:
 }
 ```
 
-With `unmountOnSuspend` on, the list of volumes to unmount is kept in
-`~/.local/state/omarchy/removable-drives-suspend`, rewritten whenever the
-mounted set changes so it is never older than the last udev event.
-
 `onConnect` runs through `bash -c` when that drive appears, with `$1` as its
 device path and `$2` as its first mount point. Nothing writes it for you.
 
@@ -177,36 +154,38 @@ omarchy-shell removable-drives lock /dev/mapper/luks-…       # close an open c
 ```
 
 `status` reports `busy: true` while the kernel still has I/O in flight, so a
-backup script can wait for the drive to settle. Both eject calls wait for
-pending writes by themselves.
+backup script can wait for the drive to settle; both eject calls wait by
+themselves. `check` returns straight away and leaves its verdict in `status` as
+`healthy`: `true`, `false`, or `null` when the answer could not be read.
 
-`rename` names the drive for this shell only; `label` writes to the filesystem.
-`check` starts an fsck and returns straight away — the verdict arrives in
-`status` as `healthy`, which is `true`, `false`, or `null` when the answer
-could not be read. Anything other than `ok` back from these is the reason they
-did not run, so a script never has to guess whether a refusal happened.
+Anything other than `ok` back from these is the reason they did not run, so a
+script never has to guess whether a refusal happened.
 
 ## How it works
 
 `Panel.qml` draws the bar icon and popup, `Service.qml` owns everything that
 touches the system, and `Model.js` is pure parsing and formatting with no QML
-or processes — which is what makes it testable without a compositor.
+or processes, which is what makes it testable without a compositor.
 
-Device-supplied strings — labels, vendor names, phone names — are hostile
+Device-supplied strings (labels, vendor names, phone names) are hostile
 input: whoever formatted a stick chooses its label. Every `Text` is pinned to
 `Text.PlainText` so Qt cannot promote one to rich text and fetch a remote
 `<img>`, and strings handed to components whose `Text` this plugin does not own
 are stripped of angle brackets first. Paths stay byte-exact, since commands are
 built from them.
 
-Renaming a filesystem and running its fsck are the two things udisks exposes
-on D-Bus that `udisksctl` has no verb for, so they go over the bus through
-`busctl`. Both are `modify-device` in the udisks policy — `allow_active: yes`
-for a removable drive, the same no-password path mounting already takes. The
-object path is asked for rather than built, because udisks escapes the kernel
-name into it and an unlocked LUKS volume ends up at `dm_2d3` rather than
-anything the device node hints at. Both operations unmount the filesystem
-first and mount it back afterwards, whether or not the middle step worked.
+Renaming a filesystem and running its fsck are things udisks exposes on D-Bus
+that `udisksctl` has no verb for, so they go over the bus through `busctl`. It
+is still `allow_active: yes`, the same no-password path mounting takes. The
+object path is asked for rather than built, since udisks escapes the kernel
+name into it and an unlocked LUKS volume lands at `dm_2d3`. Both unmount the
+filesystem first and mount it back afterwards, whether or not the middle step
+worked.
+
+A LUKS passphrase reaches udisks on stdin, never as an argument, because
+`/proc/<pid>/cmdline` is readable by every other process you run. udisksctl
+takes a key only from a file, so it is staged under `umask 077` in the
+RAM-backed runtime directory and a trap removes it however the unlock ends.
 
 Emptying a drive's trash is the only recursive delete here, so the path is
 re-derived from the live mount list and must exactly match a `.Trash-<uid>`
