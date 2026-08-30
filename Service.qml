@@ -488,6 +488,28 @@ Item {
     return "ok"
   }
 
+  // The other half of unlocking. Closing a container means taking the
+  // filesystem inside it offline first, so this is one action rather than two
+  // the user has to know the order of — and the two steps address different
+  // devices: the filesystem lives on the mapper, while only the backing
+  // partition can be locked.
+  function lock(volume) {
+    if (!volume) return "unknown volume"
+    if (busy) return refuse("Another action is still running")
+    if (!Model.canLock(volume)) return refuse("This volume is not unlocked")
+    var blocked = fsActionBlocked(volume)
+    if (blocked !== "") return refuse(blocked)
+    var script = [
+      'set -u',
+      'if [ "$2" = 1 ]; then udisksctl unmount --no-user-interaction -b "$1" >/dev/null || exit 1; fi',
+      'udisksctl lock --no-user-interaction -b "$3" >/dev/null'
+    ].join("\n")
+    runAction(["bash", "-c", script, "removable-drives",
+               volume.fsPath, volume.mounted ? "1" : "0", volume.path],
+              volume.fsPath, "lock", "Locked " + volume.title)
+    return "ok"
+  }
+
   // Ejecting a drive the kernel is still writing to is exactly the mistake
   // this widget exists to prevent, so the request is held rather than refused
   // and runs by itself the moment the drive goes quiet.
@@ -582,6 +604,8 @@ Item {
   readonly property string suspendScript: [
     'set -u',
     'targets=$1',
+    'notify=$3',
+    'glyph=$4',
     // systemd-inhibit holds the lock as an fd, so logind drops it the moment
     // that process dies — but only if it actually dies. Killing this script
     // leaves it reparented to init, still holding a delay lock that nothing
@@ -624,12 +648,25 @@ Item {
     '  kill "$MONITOR_PID" 2>/dev/null',
     '  wait "$MONITOR_PID" 2>/dev/null',
     '}',
+    // A drive that refused to unmount is the whole reason this exists, so it
+    // is the one outcome that must not pass in silence. Sleeping while
+    // believing your drives were parked is worse than never having been
+    // offered the feature: it manufactures the confidence that gets a drive
+    // pulled out of a sleeping laptop.
     'unmount_targets() {',
     '  [ -r "$1" ] || return 0',
+    '  failed=""',
     '  while IFS= read -r dev; do',
     '    [ -n "$dev" ] || continue',
-    '    udisksctl unmount --no-user-interaction -b "$dev" >/dev/null 2>&1 || true',
+    '    if udisksctl unmount --no-user-interaction -b "$dev" >/dev/null 2>&1; then',
+    '      continue',
+    '    fi',
+    '    failed="$failed $dev"',
     '  done < "$1"',
+    '  [ -n "$failed" ] || return 0',
+    '  [ "$2" = 1 ] || return 0',
+    '  omarchy-notification-send -u critical -g "$3" "Still mounted going into sleep" \\',
+    '    "Could not unmount:$failed — do not unplug until this is sorted" || true',
     '}',
     'export -f wait_for_sleep_signal unmount_targets',
     'while true; do',
@@ -638,7 +675,8 @@ Item {
     // own command line contains every name a pattern would match.
     '  setsid systemd-inhibit --what=sleep --mode=delay --who="Removable Drives"' +
       ' --why="Unmounting removable drives" \\',
-    "    bash -c 'wait_for_sleep_signal true; unmount_targets \"$1\"' removable-drives \"$targets\" &",
+    "    bash -c 'wait_for_sleep_signal true; unmount_targets \"$1\" \"$2\" \"$3\"'" +
+      ' removable-drives "$targets" "$notify" "$glyph" &',
     '  inhibit_pid=$!',
     '  printf %s "$inhibit_pid" > "$guardfile"',
     '  wait "$inhibit_pid"',
@@ -1222,7 +1260,8 @@ Item {
   Process {
     id: suspendGuard
     command: ["bash", "-c", root.suspendScript, "removable-drives",
-              root.suspendTargetsPath, root.suspendTargetsPath + ".guard"]
+              root.suspendTargetsPath, root.suspendTargetsPath + ".guard",
+              root.notificationsEnabled ? "1" : "0", Model.GLYPH_ALERT]
     running: root.unmountOnSuspend
   }
 

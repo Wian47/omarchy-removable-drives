@@ -36,7 +36,12 @@ and the bar goes back to what it was.
   is readable by every other process you run — and the filesystem is mounted as
   soon as the container opens. udisksctl takes a key only from a file, so it is
   staged under `umask 077` in the RAM-backed runtime directory and removed by a
-  trap however the unlock ends.
+  trap however the unlock ends. An open container closes again from the same
+  row — unmounting what is inside it first — without ejecting the whole drive.
+
+  With `unmountOnSuspend` on, a volume that refuses to unmount before sleep is
+  reported rather than passed over: being told your drives were parked when
+  they were not is worse than not being offered the feature.
 - **Mounts a suspect drive read-only**, so files can be copied off a
   filesystem that failed its check without writing a byte back to it. The row
   says `Read-only` while it is, read from `/proc/mounts` rather than guessed.
@@ -103,7 +108,7 @@ originals are not on the device.
 | 󰄠 󰝰 󰄝 | mount · open · unmount that volume |
 | 󰓹 󰓙 | rename the volume · check it for errors |
 | 󰉐 󰖷 | after a failed check: mount read-only · repair |
-| 󰌾 | locked volume: type the passphrase to unlock and mount |
+| 󰌾 | locked: type the passphrase to unlock · open: lock it again |
 | ⏏ ✏ | eject the drive (or cancel a held eject) · nickname it |
 | ⏏ in the header | eject every attached drive |
 
@@ -168,6 +173,7 @@ omarchy-shell removable-drives rename /dev/sdb "Work backup" # "" clears it
 omarchy-shell removable-drives label /dev/sdb1 "Photos"      # the label on the drive
 omarchy-shell removable-drives check /dev/sdb1               # verdict lands in status
 omarchy-shell removable-drives mountReadOnly /dev/sdb1       # rescue without writing
+omarchy-shell removable-drives lock /dev/mapper/luks-…       # close an open container
 ```
 
 `status` reports `busy: true` while the kernel still has I/O in flight, so a
@@ -208,7 +214,7 @@ candidate of a mounted removable volume. The tests assert it refuses `/`,
 `$HOME`, the mount root, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 151 tests, no compositor required
+node test/model.test.js       # 152 tests, no compositor required
 omarchy plugin validate .     # the same check the shell applies
 ```
 

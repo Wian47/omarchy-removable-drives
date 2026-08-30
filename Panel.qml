@@ -318,6 +318,13 @@ Panel {
       return "unknown device: " + path
     }
 
+    // Close an open LUKS container, unmounting what is inside it first.
+    function lock(path: string): string {
+      var volume = drives.volumeByPath(path)
+      if (!volume) return "unknown volume: " + path
+      return drives.lock(volume)
+    }
+
     // Mount without writing to the drive — for a filesystem that failed its
     // check, or any drive worth reading before trusting.
     function mountReadOnly(path: string): string {
@@ -1233,6 +1240,20 @@ Panel {
             onClicked: drives.emptyTrash(volumeRow.volume)
           }
         }
+      }
+
+      // Only on an open container: the unlock has its own entry point, and
+      // this is what closes it again without ejecting the whole drive.
+      PanelActionButton {
+        visible: volumeRow.volume && Model.canLock(volumeRow.volume)
+        iconText: Model.GLYPH_LOCKED
+        tooltipText: "Lock — unmounts and closes the encrypted container"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        enabled: !drives.busy
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex)) }
+        onClicked: drives.lock(volumeRow.volume)
       }
 
       // Renaming and checking both take the filesystem offline and put it

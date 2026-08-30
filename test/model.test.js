@@ -1342,6 +1342,18 @@ test("an answer that names no device yields nothing rather than a guess", () => 
   }
 })
 
+test("locking is offered exactly when unlocking is not", () => {
+  const locked = { encrypted: true, unlocked: false }
+  const open = { encrypted: true, unlocked: true }
+  const plain = { encrypted: false, unlocked: false }
+  assert.strictEqual(api.canLock(open), true)
+  assert.strictEqual(api.canLock(locked), false)
+  assert.strictEqual(api.canLock(plain), false)
+  assert.strictEqual(api.canLock(null), false)
+  assert.notStrictEqual(api.canLock(open), api.canUnlock(open))
+  assert.notStrictEqual(api.canLock(locked), api.canUnlock(locked))
+})
+
 test("only a locked encrypted volume can be unlocked", () => {
   assert.strictEqual(api.canUnlock({ encrypted: true, unlocked: false }), true)
   assert.strictEqual(api.canUnlock({ encrypted: true, unlocked: true }), false)

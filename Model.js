@@ -651,6 +651,10 @@ function canUnlock(volume) {
   return !!(volume && volume.encrypted && !volume.unlocked)
 }
 
+function canLock(volume) {
+  return !!(volume && volume.encrypted && volume.unlocked)
+}
+
 // --------------------------------------------------------- sleep guard
 
 // What the sleep guard unmounts: mounted volumes only, by fsPath, because that
