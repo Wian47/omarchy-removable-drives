@@ -491,6 +491,89 @@ test("a corrupt or missing state file reads as empty, not as a crash", () => {
   assert.deepStrictEqual(api.parseStore('{"drives":{"serial:A":{"nickname":"X"}}}').drives, { "serial:A": { nickname: "X" } })
 })
 
+console.log("\nper-drive mount policy")
+
+const POLICY_DRIVE = api.parse(tree([disk({ serial: "ABC123", children: [part({})] })]))[0]
+
+function saved(fields) {
+  return { version: 1, drives: { "serial:ABC123": fields } }
+}
+
+test("a drive with nothing saved follows the global open-after-mount setting", () => {
+  assert.strictEqual(api.shouldOpenOnMount(saved({}), POLICY_DRIVE, true), true)
+  assert.strictEqual(api.shouldOpenOnMount(saved({}), POLICY_DRIVE, false), false)
+  assert.strictEqual(api.shouldOpenOnMount(null, POLICY_DRIVE, true), true)
+  assert.strictEqual(api.shouldOpenOnMount(saved({}), null, true), true)
+})
+
+test("a drive told to open always opens, whatever the global setting says", () => {
+  assert.strictEqual(api.shouldOpenOnMount(saved({ autoOpen: true }), POLICY_DRIVE, false), true)
+})
+
+test("a drive told not to open never opens, whatever the global setting says", () => {
+  assert.strictEqual(api.shouldOpenOnMount(saved({ autoOpen: false }), POLICY_DRIVE, true), false)
+})
+
+test("an autoOpen nobody can read falls back to the global setting rather than guessing", () => {
+  for (const typo of ["true", "yes", 1, 0, {}, []]) {
+    assert.strictEqual(api.shouldOpenOnMount(saved({ autoOpen: typo }), POLICY_DRIVE, true), true,
+      JSON.stringify(typo) + " should follow the global true")
+    assert.strictEqual(api.shouldOpenOnMount(saved({ autoOpen: typo }), POLICY_DRIVE, false), false,
+      JSON.stringify(typo) + " should follow the global false")
+  }
+})
+
+test("a drive mounts writable unless it was asked not to", () => {
+  assert.strictEqual(api.shouldMountReadOnly(saved({}), POLICY_DRIVE), false)
+  assert.strictEqual(api.shouldMountReadOnly(saved({ readOnly: false }), POLICY_DRIVE), false)
+  assert.strictEqual(api.shouldMountReadOnly(null, POLICY_DRIVE), false)
+  assert.strictEqual(api.shouldMountReadOnly(saved({ readOnly: true }), null), false)
+})
+
+test("a drive marked read-only mounts read-only", () => {
+  assert.strictEqual(api.shouldMountReadOnly(saved({ readOnly: true }), POLICY_DRIVE), true)
+})
+
+test("a readOnly nobody can read keeps the drive read-only rather than mounting it writable", () => {
+  for (const typo of ["false", "no", 0, "", {}]) {
+    assert.strictEqual(api.shouldMountReadOnly(saved({ readOnly: typo }), POLICY_DRIVE), true,
+      JSON.stringify(typo) + " is not the word false, and an archive drive is not written to on a maybe")
+  }
+})
+
+test("the state file is read through the same rules the mount is", () => {
+  const store = api.parseStore('{"drives":{"serial:A":{"readOnly":"yes","autoOpen":"maybe","nickname":"Archive"}}}')
+  assert.deepStrictEqual(store.drives["serial:A"], { nickname: "Archive", readOnly: true },
+    "an unreadable readOnly stays read-only; an unreadable autoOpen goes back to the global setting")
+})
+
+test("a hand-edited boolean is kept exactly as it was written", () => {
+  const store = api.parseStore('{"drives":{"serial:A":{"readOnly":false,"autoOpen":false}}}')
+  assert.deepStrictEqual(store.drives["serial:A"], { readOnly: false, autoOpen: false })
+})
+
+test("an autoOpen written as null is the same as leaving it out", () => {
+  const store = api.parseStore('{"drives":{"serial:A":{"autoOpen":null,"nickname":"X"}}}')
+  assert.deepStrictEqual(store.drives["serial:A"], { nickname: "X" })
+})
+
+test("a drive record that is not a record at all is dropped, not carried", () => {
+  const store = api.parseStore('{"drives":{"serial:A":"read-only please","serial:B":["x"],"serial:C":{"nickname":"Keep"}}}')
+  assert.deepStrictEqual(store.drives, { "serial:C": { nickname: "Keep" } })
+})
+
+test("a record left with nothing in it does not linger in the file", () => {
+  assert.deepStrictEqual(api.parseStore('{"drives":{"serial:A":{"autoOpen":"maybe"}}}').drives, {})
+})
+
+test("the open-after-mount button cycles follow, always, never, and back", () => {
+  assert.strictEqual(api.nextAutoOpen(null), true)
+  assert.strictEqual(api.nextAutoOpen(undefined), true)
+  assert.strictEqual(api.nextAutoOpen(true), false)
+  assert.strictEqual(api.nextAutoOpen(false), null)
+  assert.strictEqual(api.nextAutoOpen("maybe"), true, "an unreadable value is already following the global setting")
+})
+
 console.log("\nphones and cameras")
 
 // Shape of `gio mount -li` with a phone attached: gvfs reports the same
@@ -1174,6 +1257,217 @@ test("nothing checked authorises nothing", () => {
   assert.strictEqual(api.repairAuthorised(CHECKED, null), false)
 })
 
+console.log("\nformatting a volume")
+
+// What udisks answered on the target machine, off the same probe that asks
+// about fsck: the supported list arrives beside CanCheck and CanRepair.
+const FORMAT_CAPS = api.parseFsCapabilities([
+  'Supported as 12 "ext2" "ext3" "ext4" "xfs" "vfat" "ntfs" "f2fs" "nilfs2" "exfat" "btrfs" "udf" "swap"',
+  'CanCheck vfat (bs) true ""'
+].join("\n"))
+
+function stick(overrides) {
+  return api.parse(tree([disk({ serial: "ABC123", children: [part(overrides || {})] })]))[0]
+}
+
+function plan(overrides) {
+  return Object.assign({ fsPath: "/dev/sdb1", fstype: "exfat", label: "PHOTOS", quick: true }, overrides)
+}
+
+const FORMAT_DRIVE = stick({})
+const FORMAT_VOLUME = FORMAT_DRIVE.volumes[0]
+
+test("the supported list comes off the probe rather than out of this file", () => {
+  assert.deepStrictEqual(FORMAT_CAPS.format,
+    ["ext2", "ext3", "ext4", "xfs", "vfat", "ntfs", "f2fs", "nilfs2", "exfat", "btrfs", "udf", "swap"])
+  assert.strictEqual(FORMAT_CAPS.check.vfat.available, true, "the fsck answers still parse alongside it")
+})
+
+test("offers the filesystems worth putting on a stick, in a stable order", () => {
+  assert.deepStrictEqual(api.formatTypes(FORMAT_CAPS), ["exfat", "vfat", "ntfs", "ext4", "btrfs"])
+})
+
+test("never offers swap or a raid member, whatever udisks says it can create", () => {
+  const offered = api.formatTypes(api.parseFsCapabilities(
+    'Supported as 3 "swap" "linux_raid_member" "exfat"'))
+  assert.deepStrictEqual(offered, ["exfat"])
+})
+
+test("a type udisks did not name is not offered either", () => {
+  assert.deepStrictEqual(api.formatTypes(api.parseFsCapabilities('Supported as 2 "ext4" "vfat"')),
+    ["vfat", "ext4"])
+})
+
+test("nothing is offered until udisks has said what it can create", () => {
+  assert.deepStrictEqual(api.formatTypes(api.parseFsCapabilities("")), [])
+  assert.deepStrictEqual(api.formatTypes({}), [])
+  assert.deepStrictEqual(api.formatTypes(null), [])
+})
+
+test("the system-mount rule reads a built drive as well as an lsblk node", () => {
+  assert.strictEqual(api.holdsSystemMount({ name: "sdb", volumes: [{ mountpoint: "/home" }] }), true)
+  assert.strictEqual(api.holdsSystemMount({ name: "sdb", volumes: [{ mountpoint: "/run/media/x/A" }] }), false)
+})
+
+test("a drive holding a system mount is refused before anything else about it", () => {
+  const device = {
+    name: "sdb", path: "/dev/sdb", volumes: [
+      { fsPath: "/dev/sdb1", name: "sdb1", title: "DATA", mounted: false, mountpoint: "" },
+      { fsPath: "/dev/sdb2", name: "sdb2", title: "root", mounted: true, mountpoint: "/" }
+    ]
+  }
+  assert.match(api.canFormat(FORMAT_CAPS, device.volumes[0], device), /system mount/,
+    "the unmounted partition beside / is on the disk running the machine")
+})
+
+test("a volume mounted at a system path is refused as one", () => {
+  const volume = { fsPath: "/dev/sdb1", name: "sdb1", title: "boot", mounted: true, mountpoint: "/boot" }
+  const device = { name: "sdb", path: "/dev/sdb", volumes: [volume] }
+  assert.match(api.canFormat(FORMAT_CAPS, volume, device), /system mount/)
+})
+
+test("a volume that is not on the drive it was handed with is refused", () => {
+  const other = stick({ name: "sdc1", path: "/dev/sdc1" })
+  assert.match(api.canFormat(FORMAT_CAPS, FORMAT_VOLUME, other), /not on a removable drive/)
+  assert.match(api.canFormat(FORMAT_CAPS, FORMAT_VOLUME, null), /not on a removable drive/)
+})
+
+test("a device-mapper node is not a removable drive this panel formats", () => {
+  const device = { name: "dm-0", path: "/dev/dm-0", removable: true, volumes: [FORMAT_VOLUME] }
+  assert.match(api.canFormat(FORMAT_CAPS, FORMAT_VOLUME, device), /not on a removable drive/)
+})
+
+test("a drive that never came out of a scan is not formattable at all", () => {
+  const device = { name: "sdb", path: "/dev/sdb", volumes: [FORMAT_VOLUME] }
+  assert.match(api.canFormat(FORMAT_CAPS, FORMAT_VOLUME, device), /not on a removable drive/,
+    "removability is only knowable from the lsblk node, so a device without the answer is refused")
+  assert.strictEqual(FORMAT_DRIVE.removable, true, "one that did come out of a scan carries it")
+})
+
+test("a mounted volume is refused rather than unmounted on the way", () => {
+  const drive = stick({ mountpoint: "/run/media/wian47/STICK" })
+  assert.strictEqual(api.canFormat(FORMAT_CAPS, drive.volumes[0], drive), "Unmount STICK first")
+})
+
+test("an open encrypted container is locked first, not formatted through", () => {
+  const drive = api.parse(tree([disk({ children: [part({
+    fstype: "crypto_LUKS", label: null,
+    children: [{ name: "luks-x", path: "/dev/mapper/luks-x", type: "crypt", fstype: "ext4",
+                 label: "VAULT", mountpoint: null, children: [] }]
+  })] })]))[0]
+  assert.strictEqual(api.canFormat(FORMAT_CAPS, drive.volumes[0], drive),
+    "Lock VAULT before formatting it")
+})
+
+test("a locked container can be erased, because that is how an encrypted stick is reused", () => {
+  const drive = stick({ fstype: "crypto_LUKS", label: null })
+  assert.strictEqual(api.canFormat(FORMAT_CAPS, drive.volumes[0], drive), null)
+})
+
+test("nothing is formattable while udisks has not said what it can create", () => {
+  assert.match(api.canFormat(api.parseFsCapabilities(""), FORMAT_VOLUME, FORMAT_DRIVE), /has not said/)
+})
+
+test("a volume that clears every rule is allowed", () => {
+  assert.strictEqual(api.canFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE), null)
+  assert.strictEqual(api.canFormat(FORMAT_CAPS, null, FORMAT_DRIVE), "No volume selected")
+})
+
+test("every refusal canFormat has is a refusal the plan has", () => {
+  const drive = stick({ mountpoint: "/run/media/wian47/STICK" })
+  const result = api.validateFormat(FORMAT_CAPS, drive.volumes[0], drive, plan({}))
+  assert.strictEqual(result.ok, false)
+  assert.strictEqual(result.reason, api.canFormat(FORMAT_CAPS, drive.volumes[0], drive))
+})
+
+test("a plan aimed at a volume other than the one it is checked against is refused", () => {
+  const result = api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ fsPath: "/dev/sdb2" }))
+  assert.strictEqual(result.ok, false)
+  assert.match(result.reason, /planned for a different volume/,
+    "a /dev path is reusable, so a plan made for one stick must not run against its replacement")
+})
+
+test("a plan that does not say whether to erase the drive first is refused", () => {
+  for (const quick of [undefined, null, "yes", 1]) {
+    assert.strictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ quick })).ok,
+      false, String(quick))
+  }
+})
+
+test("a filesystem udisks cannot create is refused by name", () => {
+  const result = api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ fstype: "swap" }))
+  assert.strictEqual(result.ok, false)
+  assert.match(result.reason, /cannot be created here/)
+})
+
+test("no filesystem chosen is its own answer rather than a silent default", () => {
+  assert.match(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ fstype: "" })).reason,
+    /Choose a filesystem/)
+})
+
+test("the label is counted against the filesystem being created, not the one being replaced", () => {
+  const roomy = api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE,
+    plan({ fstype: "ext4", label: "SIXTEEN CHARSXX" }))
+  assert.strictEqual(roomy.ok, true, "the volume is FAT32 today, but ext4 takes sixteen characters")
+
+  const tight = api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE,
+    plan({ fstype: "exfat", label: "SIXTEEN CHARSXX" }))
+  assert.strictEqual(tight.ok, false)
+  assert.match(tight.reason, /exFAT labels are at most 11 characters/)
+})
+
+test("a label the target filesystem forbids is refused before the drive is touched", () => {
+  const result = api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE,
+    plan({ fstype: "vfat", label: "MY:DISK" }))
+  assert.strictEqual(result.ok, false)
+  assert.match(result.reason, /cannot contain :/)
+})
+
+test("an empty label is a real answer here too — the drive ships without one", () => {
+  assert.strictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ label: "" })).ok, true)
+})
+
+test("a plan that clears every guard is approved", () => {
+  assert.deepStrictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({})),
+    { ok: true, reason: "" })
+})
+
+test("no plan at all is refused rather than defaulted", () => {
+  assert.strictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, null).ok, false)
+})
+
+test("the confirmation is the kernel name of the volume, not its label", () => {
+  assert.strictEqual(api.formatToken(FORMAT_VOLUME), "sdb1")
+  assert.strictEqual(api.formatConfirmed(FORMAT_VOLUME, "sdb1"), true)
+  assert.strictEqual(api.formatConfirmed(FORMAT_VOLUME, "  sdb1  "), true)
+})
+
+test("a confirmation that does not match exactly confirms nothing", () => {
+  for (const typed of ["", "sdb", "SDB1", "sdb2", "STICK", "yes"]) {
+    assert.strictEqual(api.formatConfirmed(FORMAT_VOLUME, typed), false, JSON.stringify(typed))
+  }
+  assert.strictEqual(api.formatConfirmed(null, ""), false)
+  assert.strictEqual(api.formatConfirmed({ name: "" }, ""), false, "a volume with no name cannot be confirmed")
+})
+
+test("a stick with no partition table is confirmed by the disk's own name", () => {
+  const drive = api.parse(tree([disk({ fstype: "exfat", label: "RAW", children: [] })]))[0]
+  assert.strictEqual(api.formatToken(drive.volumes[0]), "sdb")
+})
+
+test("the warning names the volume, its size, and the node about to be erased", () => {
+  const warning = api.formatWarning(FORMAT_VOLUME)
+  assert.match(warning, /STICK/)
+  assert.match(warning, /14\.6 GB/)
+  assert.match(warning, /\/dev\/sdb1/)
+  assert.strictEqual(api.formatWarning(null), "")
+})
+
+test("the line afterwards says what the drive became", () => {
+  assert.strictEqual(api.describeFormat(FORMAT_VOLUME, "exfat"), "Formatted STICK as exFAT")
+  assert.strictEqual(api.describeFormat(null, ""), "Formatted the volume")
+})
+
 console.log("\na filesystem left unmounted")
 
 test("the work that landed is still reported, with the part to act on", () => {
@@ -1359,6 +1653,329 @@ test("only a locked encrypted volume can be unlocked", () => {
   assert.strictEqual(api.canUnlock({ encrypted: true, unlocked: true }), false)
   assert.strictEqual(api.canUnlock({ encrypted: false, unlocked: false }), false)
   assert.strictEqual(api.canUnlock(null), false)
+})
+
+console.log("\nwhat a connect hook reports")
+
+test("reads the two lines a hook is asked to write", () => {
+  const progress = api.parseHookProgress("percent=42\nstatus=Copying documents\n")
+  assert.strictEqual(progress.percent, 42)
+  assert.strictEqual(progress.status, "Copying documents")
+  assert.strictEqual(progress.done, false)
+})
+
+test("a bare number on its own line is a percent", () => {
+  // The laziest possible hook is `echo 60 > "$3"`, and it should work.
+  assert.strictEqual(api.parseHookProgress("60\n").percent, 60)
+  assert.strictEqual(api.parseHookProgress("60").status, "")
+})
+
+test("a percent outside nought to a hundred is brought back inside", () => {
+  assert.strictEqual(api.parseHookProgress("percent=140").percent, 100)
+  assert.strictEqual(api.parseHookProgress("percent=-5").percent, 0)
+})
+
+test("a fraction of a percent never rounds up into a finished copy", () => {
+  assert.strictEqual(api.parseHookProgress("percent=99.6").percent, 99)
+  assert.strictEqual(api.parseHookProgress("percent=0.9").percent, 0)
+})
+
+test("a hook reporting only a status has no percent to draw", () => {
+  const progress = api.parseHookProgress("status=Verifying")
+  assert.strictEqual(progress.percent, null)
+  assert.strictEqual(progress.status, "Verifying")
+})
+
+test("a percent nobody can read is no percent rather than nought", () => {
+  assert.strictEqual(api.parseHookProgress("percent=soon").percent, null)
+  assert.strictEqual(api.parseHookProgress("percent=").percent, null)
+})
+
+test("a status line is stripped like every other string a device supplies", () => {
+  // A hook's status carries filenames, and a filename contains anything.
+  const progress = api.parseHookProgress('status=Copying <img src="http://x/b.png">')
+  assert.ok(!progress.status.includes("<") && !progress.status.includes(">"), progress.status)
+})
+
+test("a status too long for the row is cut rather than allowed to overflow", () => {
+  const progress = api.parseHookProgress("status=" + "x".repeat(400))
+  assert.strictEqual(progress.status.length, 120)
+  assert.ok(progress.status.endsWith("…"))
+})
+
+test("a file with nothing readable in it is nothing, not an empty record", () => {
+  for (const raw of ["", "\n", "garbage", "no equals sign here", null, undefined]) {
+    assert.strictEqual(api.parseHookProgress(raw), null, JSON.stringify(raw))
+  }
+})
+
+test("only the hook may say it is done, never the percent on its own", () => {
+  assert.strictEqual(api.parseHookProgress("percent=100").done, false,
+    "an rsync sitting at 100% is still flushing")
+  assert.strictEqual(api.parseHookProgress("done=1").done, true)
+  assert.strictEqual(api.parseHookProgress("done=true").done, true)
+  assert.strictEqual(api.parseHookProgress("done=0").done, false)
+})
+
+test("a dead hook ends the progress it left sitting at 42 percent", () => {
+  // The case that lies: a hook killed mid-copy stops updating its file, and
+  // the last percent it wrote stays there forever.
+  const state = api.hookState({ percent: 42, status: "Copying documents", done: false }, false)
+  assert.strictEqual(state.active, false, "the process is gone, so the copy is over")
+  assert.strictEqual(state.done, true)
+  assert.strictEqual(state.percent, 42, "where it stopped is still worth reporting")
+})
+
+test("a hook still running is not finished, whatever percent it is at", () => {
+  const state = api.hookState({ percent: 100, status: "", done: false }, true)
+  assert.strictEqual(state.active, true)
+  assert.strictEqual(state.done, false)
+})
+
+test("a hook that says it is done is done, even before its process goes", () => {
+  const state = api.hookState({ percent: 80, status: "Tidying up", done: true }, true)
+  assert.strictEqual(state.active, false)
+  assert.strictEqual(state.done, true)
+})
+
+test("a hook that has written nothing yet is still running", () => {
+  const state = api.hookState(null, true)
+  assert.strictEqual(state.active, true)
+  assert.strictEqual(state.percent, null)
+  assert.strictEqual(state.status, "")
+})
+
+test("no hook at all is not a finished hook", () => {
+  const state = api.hookState(null, false)
+  assert.strictEqual(state.active, false)
+  assert.strictEqual(state.done, false, "nothing ran, so nothing finished")
+})
+
+test("the row says what the hook says, and says something when it says nothing", () => {
+  assert.strictEqual(api.hookLabel(api.hookState({ percent: 5, status: "Copying", done: false }, true)), "Copying")
+  assert.strictEqual(api.hookLabel(api.hookState({ percent: 5, status: "", done: false }, true)),
+    "Running its connect hook…")
+  assert.strictEqual(api.hookLabel(api.hookState({ percent: 5, status: "Copying", done: false }, false)), "",
+    "a finished hook leaves the row alone")
+  assert.strictEqual(api.hookLabel(null), "")
+})
+
+test("one poll answers for every drive, each with its own liveness", () => {
+  const raw = [
+    "==> serial_ABC123 1 <==",
+    "percent=42",
+    "status=Copying documents",
+    "==> serial_DEAD 0 <==",
+    "percent=100",
+    "==> serial_QUIET 1 <=="
+  ].join("\n")
+  const report = api.parseHookReport(raw)
+  assert.deepStrictEqual(Object.keys(report), ["serial_ABC123", "serial_DEAD", "serial_QUIET"])
+  assert.strictEqual(report["serial_ABC123"].active, true)
+  assert.strictEqual(report["serial_ABC123"].status, "Copying documents")
+  assert.strictEqual(report["serial_DEAD"].active, false, "the pid file is gone, so the hook is")
+  assert.strictEqual(report["serial_DEAD"].done, true)
+  assert.strictEqual(report["serial_QUIET"].active, true, "started, nothing written yet")
+})
+
+test("an empty or unreadable poll leaves no drive claiming a hook", () => {
+  assert.deepStrictEqual(api.parseHookReport(""), {})
+  assert.deepStrictEqual(api.parseHookReport("percent=50"), {},
+    "a body with no header belongs to no drive")
+})
+
+test("a progress file name cannot leave the directory it belongs in", () => {
+  // The drive key falls back to a device-supplied model string, and this names
+  // a path the plugin then creates and writes to.
+  assert.strictEqual(api.hookProgressName("serial:ABC123"), "serial_ABC123")
+  assert.strictEqual(api.hookProgressName("model:../../../etc/cron.d/x:0"),
+    "model_.._.._.._etc_cron.d_x_0")
+  assert.ok(!api.hookProgressName("model:a/b:1").includes("/"))
+  assert.strictEqual(api.hookProgressName("uuid:DEAD-BEEF"), "uuid_DEAD-BEEF")
+})
+
+test("a key that is nothing but dots gets no file name at all", () => {
+  assert.strictEqual(api.hookProgressName(".."), "")
+  assert.strictEqual(api.hookProgressName("."), "")
+  assert.strictEqual(api.hookProgressName(""), "")
+})
+
+console.log("\ndrive health")
+
+// Captured verbatim from `busctl get-property` against
+// org.freedesktop.UDisks2.NVMe.Controller on this machine.
+const SMART_NVME = [
+  "SmartCriticalWarning as 0",
+  "SmartTemperature q 306",
+  "SmartPowerOnHours t 1417",
+  'SmartSelftestStatus s "success"',
+  "SmartUpdated t 1788160679"
+].join("\n")
+
+// The ATA shape, which reports its temperature as a double and its age in
+// seconds rather than hours.
+const SMART_ATA = [
+  "SmartFailing b false",
+  "SmartTemperature d 305.15",
+  "SmartPowerOnSeconds t 7574400",
+  "SmartNumBadSectors x 0",
+  "SmartNumAttributesFailing i 0",
+  'SmartSelftestStatus s "success"',
+  "SmartUpdated t 1788160679"
+].join("\n")
+
+test("an NVMe temperature comes back in Celsius, not in Kelvin", () => {
+  const smart = api.parseSmart(SMART_NVME)
+  assert.strictEqual(smart.temperatureC, 32.8,
+    "306 is what the bus says; 306 degrees and 33 kelvin are both wrong")
+})
+
+test("a second reading proves it is a conversion and not a fitted constant", () => {
+  // Both points were read off this machine's bus and checked against the same
+  // drive's hwmon sensors, which said 36.85 °C when the bus said 310 K.
+  assert.strictEqual(api.parseSmart("SmartTemperature q 310").temperatureC, 36.8)
+  assert.strictEqual(api.celsiusFromKelvin(310) - api.celsiusFromKelvin(306), 4,
+    "four kelvin apart is four degrees apart")
+})
+
+test("an ATA temperature is the same unit through a different type", () => {
+  assert.strictEqual(api.parseSmart(SMART_ATA).temperatureC, 32.0)
+})
+
+test("a drive's age is reported in hours whichever way it counts", () => {
+  assert.strictEqual(api.parseSmart(SMART_NVME).powerOnHours, 1417)
+  assert.strictEqual(api.parseSmart(SMART_ATA).powerOnHours, 2104, "7574400 seconds is 2104 hours")
+})
+
+test("the rest of the record survives the round trip", () => {
+  const smart = api.parseSmart(SMART_NVME)
+  assert.strictEqual(smart.supported, true)
+  assert.strictEqual(smart.selftest, "success")
+  assert.strictEqual(smart.updatedAt, 1788160679)
+  assert.deepStrictEqual(smart.warnings, [])
+  const ata = api.parseSmart(SMART_ATA)
+  assert.strictEqual(ata.failing, false)
+  assert.strictEqual(ata.badSectors, 0)
+})
+
+test("a drive that carries neither interface reports nothing", () => {
+  // The common case, not the error case: a USB thumb drive has no SMART at all.
+  for (const raw of ["", "\n", null, undefined, "some unrelated output"]) {
+    const smart = api.parseSmart(raw)
+    assert.strictEqual(smart.supported, false, JSON.stringify(raw))
+    assert.strictEqual(smart.failing, null)
+    assert.strictEqual(smart.temperatureC, null)
+    assert.strictEqual(smart.powerOnHours, null)
+    assert.strictEqual(smart.badSectors, null)
+    assert.strictEqual(smart.selftest, null)
+    assert.strictEqual(smart.updatedAt, null)
+    assert.strictEqual(smart.warnings, null)
+  }
+})
+
+test("a drive with no health to report is unremarkable, not a warning", () => {
+  assert.strictEqual(api.smartVerdict(api.parseSmart("")), "unsupported")
+  assert.strictEqual(api.smartVerdict(null), "unsupported")
+  assert.strictEqual(api.smartHint(api.parseSmart("")), "",
+    "a thumb drive must not grow a health row it will never fill")
+})
+
+test("a drive with nothing wrong with it is healthy", () => {
+  assert.strictEqual(api.smartVerdict(api.parseSmart(SMART_NVME)), "healthy")
+  assert.strictEqual(api.smartVerdict(api.parseSmart(SMART_ATA)), "healthy")
+})
+
+test("a drive that says it is failing is failing", () => {
+  const smart = api.parseSmart(SMART_ATA.replace("SmartFailing b false", "SmartFailing b true"))
+  assert.strictEqual(smart.failing, true)
+  assert.strictEqual(api.smartVerdict(smart), "failing")
+})
+
+test("reallocated sectors are a warning, not a failure", () => {
+  const smart = api.parseSmart(SMART_ATA.replace("SmartNumBadSectors x 0", "SmartNumBadSectors x 4"))
+  assert.strictEqual(api.smartVerdict(smart), "warning",
+    "the drive has not given up, and saying it has would be overstating it")
+  assert.match(api.smartHint(smart), /4 reallocated sectors/)
+})
+
+test("an NVMe critical warning is a warning too", () => {
+  const smart = api.parseSmart(SMART_NVME.replace("SmartCriticalWarning as 0",
+    'SmartCriticalWarning as 1 "spare"'))
+  assert.deepStrictEqual(smart.warnings, ["spare"])
+  assert.strictEqual(api.smartVerdict(smart), "warning")
+  assert.match(api.smartHint(smart), /spare capacity is low/)
+})
+
+test("a critical-warning flag nobody has a sentence for is repeated verbatim", () => {
+  const smart = api.parseSmart('SmartCriticalWarning as 1 "something_new"')
+  assert.match(api.smartHint(smart), /something_new/)
+})
+
+test("the hint is stripped like anything else headed for a tooltip we do not own", () => {
+  // udisks picks these words rather than the device, but the hint reaches a
+  // qs.Ui tooltip whose Text cannot be pinned from here.
+  const hint = api.smartHint(api.parseSmart('SmartCriticalWarning as 1 "<img src=x>"'))
+  assert.ok(!hint.includes("<") && !hint.includes(">"), hint)
+})
+
+test("several critical warnings are read as a list", () => {
+  const smart = api.parseSmart('SmartCriticalWarning as 2 "spare" "degraded"')
+  assert.deepStrictEqual(smart.warnings, ["spare", "degraded"])
+  assert.match(api.smartHint(smart), /spare capacity is low and its reliability is degraded/)
+})
+
+test("a self-test that ended in an error is not a healthy drive", () => {
+  for (const status of ["fatal", "error_read", "fatal_error", "known_seg_error"]) {
+    const smart = api.parseSmart(SMART_ATA.replace('"success"', '"' + status + '"'))
+    assert.strictEqual(api.smartVerdict(smart), "warning", status)
+  }
+})
+
+test("a self-test somebody cancelled is not evidence of anything", () => {
+  for (const status of ["success", "aborted", "interrupted", "inprogress", "ctrl_reset"]) {
+    const smart = api.parseSmart(SMART_ATA.replace('"success"', '"' + status + '"'))
+    assert.strictEqual(api.smartVerdict(smart), "healthy", status)
+  }
+})
+
+test("zero kelvin means udisks does not know, not absolute zero", () => {
+  const nvme = api.parseSmart("SmartTemperature q 0\nSmartPowerOnHours t 12")
+  assert.strictEqual(nvme.temperatureC, null)
+  assert.strictEqual(api.celsiusFromKelvin("0.0"), null)
+  assert.strictEqual(api.celsiusFromKelvin("nonsense"), null)
+})
+
+test("the hint prints the numbers rather than judging them", () => {
+  // No invented temperature threshold: a figure someone can read and look up
+  // beats a line drawn here on a guess.
+  const hint = api.smartHint(api.parseSmart(SMART_NVME))
+  assert.strictEqual(hint, "No problems reported · 32.8 °C · 1417 hours powered on")
+})
+
+test("a failing drive is told to its owner plainly", () => {
+  const smart = api.parseSmart(SMART_ATA.replace("SmartFailing b false", "SmartFailing b true"))
+  assert.match(api.smartHint(smart), /^This drive reports itself as failing/)
+})
+
+test("one probe answers for every attached drive", () => {
+  const raw = [
+    "==> /dev/sdb <==",
+    "==> /dev/sdc <==",
+    SMART_ATA,
+    "==> /dev/nvme0n1 <==",
+    SMART_NVME
+  ].join("\n")
+  const report = api.parseSmartReport(raw)
+  assert.deepStrictEqual(Object.keys(report), ["/dev/sdb", "/dev/sdc", "/dev/nvme0n1"])
+  assert.strictEqual(report["/dev/sdb"].supported, false, "a thumb drive answers with nothing")
+  assert.strictEqual(report["/dev/sdc"].powerOnHours, 2104)
+  assert.strictEqual(report["/dev/nvme0n1"].temperatureC, 32.8)
+})
+
+test("a drive udisks could not resolve reads as unsupported, not as an error", () => {
+  assert.deepStrictEqual(api.parseSmartReport(""), {})
+  const report = api.parseSmartReport("==> /dev/sdb <==\n")
+  assert.strictEqual(api.smartVerdict(report["/dev/sdb"]), "unsupported")
 })
 
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)

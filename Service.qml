@@ -26,6 +26,17 @@ Item {
   // in flight, and whether the drive is settled enough to pull.
   property var activity: ({})
 
+  // What each drive's onConnect hook is doing, keyed by the name of the file
+  // it reports into. A hook is the one kind of work on a drive the kernel
+  // counters cannot see: an rsync goes quiet between file batches.
+  property var hooks: ({})
+
+  // Health as udisks reports it, keyed by device path. Most drives report
+  // none — a USB stick carries neither SMART interface — and that is a normal,
+  // quiet answer rather than a fault.
+  property var smart: ({})
+  property string _smartSignature: ""
+
   // The panel sets this while it is open, so free space stays current while
   // someone is looking at it and costs nothing while they are not.
   property bool watchClosely: false
@@ -68,10 +79,12 @@ Item {
   property string uid: ""
 
   // What udisks says it can fsck, asked about the filesystem types actually
-  // attached. The signature is the sorted list it was last asked about, so a
-  // drive going in or out only costs a probe when it brings a new type.
-  property var fsCapabilities: ({ check: {}, repair: {} })
+  // attached, and what it says it can create, which is the same answer for
+  // every drive. The signature is the sorted list it was last asked about, so
+  // a drive going in or out only costs a probe when it brings a new type.
+  property var fsCapabilities: ({ check: {}, repair: {}, format: [] })
   property string _capsSignature: ""
+  property bool _capsProbed: false
 
   // The filesystem the last check was about, and what it said: true healthy,
   // false damaged, null unreadable. A repair is only ever offered for this
@@ -106,12 +119,11 @@ Item {
     return total
   }
 
-  // True while any attached drive still has I/O in flight — the state in which
-  // pulling the drive is what loses data.
+  // True while any attached drive still has I/O in flight or is running its
+  // connect hook — the state in which pulling the drive is what loses data.
   readonly property bool anyBusy: {
     for (var i = 0; i < devices.length; i++) {
-      var entry = activity[devices[i].name]
-      if (entry && entry.busy) return true
+      if (isDeviceBusy(devices[i])) return true
     }
     return false
   }
@@ -182,9 +194,13 @@ Item {
     return activity[device.name] || null
   }
 
+  // A running hook counts as busy for the same reason kernel I/O does: pulling
+  // the drive while it works is what loses the copy. It goes through here
+  // rather than beside it, so the eject hold, the pending-eject wait and the
+  // bar icon all pick it up without a second mechanism to keep in step.
   function isDeviceBusy(device) {
     var entry = activityFor(device)
-    return !!(entry && entry.busy)
+    return !!(entry && entry.busy) || hookActive(device)
   }
 
   function activityLabelFor(device) {
@@ -211,8 +227,11 @@ Item {
   // What the rescan button and `r` do. Unlike refresh(), it also forgets what
   // udisks last said it could fsck — so installing a missing tool and pressing
   // rescan is enough to make the check button appear, without a shell restart.
+  // Health is forgotten for the same reason: it is the only other answer here
+  // that is read once and then kept.
   function rescan() {
-    _capsSignature = ""
+    forgetCapabilities()
+    _smartSignature = ""
     refresh()
     refreshPortables()
   }
@@ -242,6 +261,7 @@ Item {
 
     if (watchClosely) probeTrash()
     probeCapabilities()
+    probeSmart()
     updateSuspendTargets()
 
     // A mount requested with "open after mounting" only knows where the
@@ -384,11 +404,20 @@ Item {
     actionProcess.running = true
   }
 
+  // The drive gets the last word on both halves of this. A drive saved as
+  // read-only mounts read-only however it was reached, and its own autoOpen
+  // decides whether a file manager follows — `openAfter` is the global default
+  // the caller came with, not the answer.
   function mount(volume, openAfter) {
     if (!volume || !Model.isMountable(volume) || busy) return
-    _openAfterPath = openAfter ? volume.fsPath : ""
-    runAction(["udisksctl", "mount", "--no-user-interaction", "-b", volume.fsPath],
-              volume.fsPath, "mount", "Mounted " + volume.title)
+    var device = deviceOfVolume(volume)
+    var readOnly = Model.shouldMountReadOnly(store, device)
+    _openAfterPath = Model.shouldOpenOnMount(store, device, openAfter === true) ? volume.fsPath : ""
+    var command = ["udisksctl", "mount", "--no-user-interaction"]
+    if (readOnly) command.push("-o", "ro")
+    command.push("-b", volume.fsPath)
+    runAction(command, volume.fsPath, "mount",
+              "Mounted " + volume.title + (readOnly ? " read-only" : ""))
   }
 
   function unmount(volume, force) {
@@ -458,10 +487,18 @@ Item {
   // runs, and a passphrase in argv is a passphrase in `ps`.
   //
   // udisks refuses the backing partition for mount and unmount alike, so the
-  // mount that follows targets the mapper udisksctl names on its way out.
+  // mount that follows targets the mapper udisksctl names on its way out —
+  // and honours the drive's own read-only setting, because the container is
+  // the third way a filesystem on it can come up.
   readonly property string unlockScript: [
     'set -u',
     'dev=$1',
+    'ro=$2',
+    'mountfs() {',
+    '  if [ "$ro" = 1 ]; then udisksctl mount --no-user-interaction -o ro -b "$1" >/dev/null',
+    '  else udisksctl mount --no-user-interaction -b "$1" >/dev/null',
+    '  fi',
+    '}',
     'keyfile="${XDG_RUNTIME_DIR:-/dev/shm}/removable-drives.$$.key"',
     "trap 'rm -f \"$keyfile\"' EXIT INT TERM",
     'umask 077',
@@ -473,7 +510,7 @@ Item {
     'mapper=${out##* as }',
     'mapper=${mapper%.}',
     'case "$mapper" in',
-    '  /dev/*) udisksctl mount --no-user-interaction -b "$mapper" >/dev/null ;;',
+    '  /dev/*) mountfs "$mapper" ;;',
     '  *) echo "udisks did not say which device it unlocked" >&2; exit 1 ;;',
     'esac'
   ].join("\n")
@@ -482,7 +519,8 @@ Item {
     if (!Model.canUnlock(volume)) return "This volume is not locked"
     if (busy) return refuse("Another action is still running")
     if (String(passphrase || "") === "") return refuse("Enter the passphrase first")
-    runAction(["bash", "-c", unlockScript, "removable-drives", volume.path],
+    var readOnly = Model.shouldMountReadOnly(store, deviceOfVolume(volume))
+    runAction(["bash", "-c", unlockScript, "removable-drives", volume.path, readOnly ? "1" : "0"],
               volume.fsPath, "unlock", "Unlocked " + volume.title,
               String(passphrase))
     return "ok"
@@ -720,19 +758,73 @@ Item {
     saveDriveSetting(device, "nickname", String(nickname || "").replace(/^\s+|\s+$/g, ""))
   }
 
+  // Both save null rather than false for the off position, so turning a
+  // setting back off leaves the file the way it was before anyone touched it
+  // instead of littering it with defaults written out longhand.
+  function cycleAutoOpen(device) {
+    saveDriveSetting(device, "autoOpen", Model.nextAutoOpen(driveSetting(device, "autoOpen", null)))
+  }
+
+  function setDriveReadOnly(device, readOnly) {
+    saveDriveSetting(device, "readOnly", readOnly ? true : null)
+  }
+
   function driveSetting(device, name, fallback) {
     var saved = Model.driveSettings(store, device)
     var value = saved[name]
     return value === undefined || value === null ? fallback : value
   }
 
+  // ------------------------------------------------------- connect hooks
+  //
   // A user-authored command run when a specific drive appears — a backup, a
   // sync, an import. It is never inferred and never suggested; it only runs
   // if someone put it in the state file for that drive themselves.
+  //
+  // Until it had somewhere to report, the panel drew a drive running an rsync
+  // as an idle one, and someone could pull it mid-copy. The busy icon is no
+  // substitute: kernel I/O goes quiet between an rsync's file batches.
+
+  // Where a hook writes its progress, and the only file this plugin ever asks
+  // one to touch. XDG_RUNTIME_DIR is tmpfs, so it never reaches persistent
+  // storage and never outlives the session.
+  readonly property string progressDir: {
+    var runtime = String(Quickshell.env("XDG_RUNTIME_DIR") || "")
+    return (runtime !== "" ? runtime : "/dev/shm") + "/omarchy-removable-drives/progress"
+  }
+
+  function progressName(device) {
+    return Model.hookProgressName(Model.driveKey(device))
+  }
+
+  // The wrapper is what lets the panel tell a hook still working from one that
+  // died: it records its own pid beside the progress file, and a trap clears
+  // that however the hook ends. A pid file rather than a Process held here,
+  // because a hook outlives a shell restart and the panel should find it again
+  // when it comes back.
+  //
+  // The user's command still reaches bash as a positional argument rather than
+  // as script text, and gains $3 — the file above — beside the $1 and $2 it
+  // already had. Every hook written before this one is unaffected.
+  readonly property string hookScript: [
+    'set -u',
+    'dir=$1',
+    'file=$dir/$2',
+    'mkdir -p "$dir" || exit 1',
+    ': > "$file" || exit 1',
+    "trap 'rm -f \"$file.pid\"' EXIT INT TERM HUP",
+    'printf %s "$$" > "$file.pid"',
+    'bash -c "$5" removable-drives "$3" "$4" "$file"'
+  ].join("\n")
+
   function runConnectHook(device) {
     var command = String(driveSetting(device, "onConnect", "")).replace(/^\s+|\s+$/g, "")
     if (command === "") return
-    Quickshell.execDetached(["bash", "-c", command, "removable-drives", device.path, mountpointOf(device)])
+    var name = progressName(device)
+    if (name === "") return
+    markHookStarted(name)
+    Quickshell.execDetached(["bash", "-c", hookScript, "removable-drives",
+                             progressDir, name, device.path, mountpointOf(device), command])
   }
 
   function mountpointOf(device) {
@@ -741,6 +833,119 @@ Item {
       if (device.volumes[i].mounted) return device.volumes[i].mountpoint
     }
     return ""
+  }
+
+  // One pass over every drive with a hook: whether the process this plugin
+  // started is still alive, then whatever it has written. Capped, because a
+  // runaway hook writing into its progress file should cost a truncated line
+  // rather than the whole panel.
+  readonly property string hookPollScript: [
+    'set -u',
+    'dir=$1',
+    'shift',
+    'for name; do',
+    '  file=$dir/$name',
+    '  run=0',
+    '  pid=$(cat "$file.pid" 2>/dev/null) || pid=""',
+    '  case "$pid" in',
+    '    ""|*[!0-9]*) ;;',
+    '    *) kill -0 "$pid" 2>/dev/null && run=1 ;;',
+    '  esac',
+    '  echo "==> $name $run <=="',
+    '  if [ -r "$file" ]; then head -c 1024 "$file"; echo; fi',
+    'done'
+  ].join("\n")
+
+  function hookedDrives() {
+    var out = []
+    for (var i = 0; i < devices.length; i++) {
+      var command = String(driveSetting(devices[i], "onConnect", "")).replace(/^\s+|\s+$/g, "")
+      if (command === "") continue
+      var name = progressName(devices[i])
+      if (name !== "") out.push(name)
+    }
+    return out
+  }
+
+  // Polling stops once every hook has reported itself finished, so a drive
+  // whose hook ran an hour ago costs nothing per second. A hook starting marks
+  // that drive active again, which is what starts the poll back up.
+  function hooksWorthPolling() {
+    var names = hookedDrives()
+    for (var i = 0; i < names.length; i++) {
+      var state = hooks[names[i]]
+      if (!state || state.active) return names
+    }
+    return []
+  }
+
+  function sampleHooks() {
+    if (hooksProcess.running) return
+    var names = hooksWorthPolling()
+    if (names.length === 0) return
+    var command = ["bash", "-c", hookPollScript, "removable-drives", progressDir]
+    for (var i = 0; i < names.length; i++) command.push(names[i])
+    hooksProcess.command = command
+    hooksProcess.running = true
+  }
+
+  // Rebuilt against the drives actually attached, the same way the busy tally
+  // is, so a drive that has gone takes its hook state with it.
+  function applyHooks(raw) {
+    var report = Model.parseHookReport(raw)
+    var live = hookedDrives()
+    var next = {}
+    for (var i = 0; i < live.length; i++) {
+      var name = live[i]
+      if (report[name] !== undefined) next[name] = report[name]
+      else if (hooks[name] !== undefined) next[name] = hooks[name]
+    }
+    hooks = next
+    advancePendingEject()
+  }
+
+  // Busy from the instant the hook is launched rather than from the first poll
+  // a second later, so an eject clicked in that gap is held rather than cutting
+  // power to a copy that had only just started. It is also what puts the drive
+  // back in the poll, since the poll stops once every hook has finished.
+  function markHookStarted(name) {
+    var next = {}
+    for (var key in hooks) next[key] = hooks[key]
+    next[name] = { active: true, percent: null, status: "", done: false }
+    hooks = next
+  }
+
+  function hookStateFor(device) {
+    if (!device) return null
+    var name = progressName(device)
+    return name === "" ? null : (hooks[name] || null)
+  }
+
+  function hookActive(device) {
+    var state = hookStateFor(device)
+    return !!(state && state.active)
+  }
+
+  function hookLabelFor(device) {
+    return Model.hookLabel(hookStateFor(device))
+  }
+
+  // What `status` reports, so a backup script polling for a drive to settle
+  // sees the same thing the panel does.
+  function hookReport() {
+    var out = []
+    for (var i = 0; i < devices.length; i++) {
+      var state = hookStateFor(devices[i])
+      if (!state) continue
+      out.push({
+        device: devices[i].path,
+        active: state.active,
+        percent: state.percent,
+        status: state.status,
+        done: state.done
+      })
+    }
+    return out
   }
 
   // -------------------------------------------------------------- trash
@@ -869,23 +1074,34 @@ Item {
     'exit $rc'
   ].join("\n")
 
-  // One round trip per filesystem type, and only for the types attached.
+  // One round trip per filesystem type, and only for the types attached, plus
+  // one for the list of filesystems udisks will create. That last one is asked
+  // even when nothing attached has a filesystem at all — a stick with no
+  // partition table is exactly the one somebody wants to format.
   readonly property string capsScript:
-    'for fs in "$@"; do for op in CanCheck CanRepair; do' +
+    'out=$(busctl --timeout=10 get-property org.freedesktop.UDisks2' +
+    ' /org/freedesktop/UDisks2/Manager org.freedesktop.UDisks2.Manager' +
+    ' SupportedFilesystems 2>/dev/null) || out="";' +
+    ' echo "Supported $out";' +
+    ' for fs in "$@"; do for op in CanCheck CanRepair; do' +
     ' out=$(busctl --timeout=10 call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager' +
     ' org.freedesktop.UDisks2.Manager "$op" s "$fs" 2>/dev/null) || out="";' +
     ' echo "$op $fs $out"; done; done'
 
+  // What rescan and a fresh install of a missing tool both mean: ask udisks
+  // again rather than trusting the answer from before.
+  function forgetCapabilities() {
+    _capsProbed = false
+    _capsSignature = ""
+  }
+
   function probeCapabilities() {
-    if (capsProcess.running) return
+    if (capsProcess.running || devices.length === 0) return
     var types = Model.fsTypesPresent(devices)
     var signature = types.join(",")
-    if (signature === _capsSignature) return
+    if (_capsProbed && signature === _capsSignature) return
+    _capsProbed = true
     _capsSignature = signature
-    if (types.length === 0) {
-      fsCapabilities = ({ check: {}, repair: {} })
-      return
-    }
     var command = ["bash", "-c", capsScript, "removable-drives"]
     for (var i = 0; i < types.length; i++) command.push(types[i])
     capsProcess.command = command
@@ -910,6 +1126,9 @@ Item {
   function fsActionBlocked(volume) {
     if (!volume) return "No volume selected"
     var device = deviceOfVolume(volume)
+    if (device && hookActive(device)) {
+      return device.title + " is still running its connect hook — try again once it finishes"
+    }
     if (device && Model.sustainedBusy(_busyTicks[device.name])) {
       return device.title + " is still being written to — try again once it settles"
     }
@@ -993,12 +1212,84 @@ Item {
     return "ok"
   }
 
+  // ------------------------------------------------------------- formatting
+
+  // Format lives on org.freedesktop.UDisks2.Block rather than on Filesystem,
+  // and takes (s type, a{sv} options), so it resolves the object the same way
+  // the rename and fsck script does — asked for, never built, because udisks
+  // escapes the kernel name into it.
+  //
+  // There is no unmount and no remount around this one. A mounted volume is
+  // refused outright rather than taken offline on the way to being erased, so
+  // by the time the script runs the drive is already the way the person left
+  // it.
+  //
+  // The options are assembled as positional arguments and counted, because the
+  // label is the one string here somebody typed and it must never become part
+  // of the script text. take-ownership is what makes a fresh ext4 or btrfs
+  // writable by the person who asked for it rather than by root alone; udisks
+  // ignores it on the filesystems that have no ownership to take.
+  readonly property string formatScript: [
+    'set -u',
+    'dev=$1',
+    'fstype=$2',
+    'label=$3',
+    'erase=$4',
+    'raw=$(busctl call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager' +
+      ' org.freedesktop.UDisks2.Manager ResolveDevice "a{sv}a{sv}" 1 path s "$dev" 0) || exit 1',
+    'obj=/${raw#*/}',
+    'obj=${obj%?}',
+    'case "$obj" in',
+    '  /org/freedesktop/UDisks2/block_devices/*) ;;',
+    '  *) echo "udisks does not recognise $dev" >&2; exit 1 ;;',
+    'esac',
+    'count=1',
+    'set -- take-ownership b true',
+    'if [ -n "$label" ]; then count=$((count + 1)); set -- "$@" label s "$label"; fi',
+    'if [ "$erase" = 1 ]; then count=$((count + 1)); set -- "$@" erase s zero; fi',
+    // Zeroing a drive has no useful upper bound and neither does laying down a
+    // big NTFS volume, so the bus timeout is a day rather than busctl's default
+    // twenty-five seconds, which would abandon the call mid-write.
+    'busctl --timeout=86400 call org.freedesktop.UDisks2 "$obj"' +
+      ' org.freedesktop.UDisks2.Block Format "sa{sv}" "$fstype" "$count" "$@"'
+  ].join("\n")
+
+  // The only thing here that destroys data on purpose. Every refusal comes
+  // back as the sentence the panel would have shown, so a script calling this
+  // over IPC learns why nothing happened — and the plan is validated whole,
+  // against the volume it names, before a byte of it reaches the bus.
+  function formatVolume(volume, fstype, label, quick) {
+    if (!volume) return "unknown volume"
+    if (busy) return refuse("Another action is still running")
+
+    var plan = {
+      fsPath: volume.fsPath,
+      fstype: Model.clean(fstype),
+      label: Model.normaliseLabel(label),
+      quick: quick !== false
+    }
+    var checked = Model.validateFormat(fsCapabilities, volume, deviceOfVolume(volume), plan)
+    if (!checked.ok) return refuse(checked.reason)
+
+    var blocked = fsActionBlocked(volume)
+    if (blocked !== "") return refuse(blocked)
+
+    // Nothing is opened afterwards, and nothing is mounted back. Somebody who
+    // has just erased a disk wants to see the empty volume in the panel, not a
+    // file manager opening over it.
+    _openAfterPath = ""
+    runAction(["bash", "-c", formatScript, "removable-drives",
+               plan.fsPath, plan.fstype, plan.label, plan.quick ? "0" : "1"],
+              plan.fsPath, "format", Model.describeFormat(volume, plan.fstype))
+    return "ok"
+  }
+
   // Same bargain as the gvfs hint: a plugin may not install anything, so it
   // names the package udisks went looking for and opens Omarchy's installer.
   function installCheckTools(volume) {
     var hint = Model.checkHint(fsCapabilities, volume)
     if (!hint || hint.packages === "") return
-    _capsSignature = ""
+    forgetCapabilities()
     Quickshell.execDetached(["omarchy-install-app", hint.label, hint.packages])
   }
 
@@ -1034,6 +1325,120 @@ Item {
            actionStatus,
            repaired ? Model.GLYPH_HEALTHY : Model.GLYPH_ALERT,
            repaired ? "" : "normal")
+  }
+
+  // ------------------------------------------------------- drive health
+  //
+  // smartctl is the reflex and it is the wrong tool: it wants root for most
+  // devices, and smartmontools is not standard on Omarchy, so reaching for it
+  // would break both "nothing runs as root" and "no extra packages". udisks
+  // already does the privileged read and publishes the answer over the bus on
+  // the same allow_active path mounting takes.
+  //
+  // Most drives will answer with nothing. Only an external SSD or a hard drive
+  // behind a SAT-capable bridge reports health at all; a USB thumb drive
+  // carries neither interface, and that silence is the normal answer rather
+  // than something to explain.
+
+  // Both interfaces are asked of every drive and the absent one simply answers
+  // nothing, which costs less than asking udisks which of the two a drive has
+  // and then asking again.
+  //
+  // The object path is resolved rather than built, the same way fsScript does
+  // it — and health lives on the drive object rather than the block one, so it
+  // takes the second lookup to get there.
+  //
+  // Reading the properties does not refresh them. udisks hands back whatever
+  // its own last poll cached, which measured ten minutes stale here: the bus
+  // said 308 K while every hwmon sensor on the same drive said 36.85 °C, a gap
+  // of two degrees that is staleness rather than arithmetic. So SmartUpdate is
+  // called first. It is `allow_active: yes` in the udisks policy — the same
+  // no-password path everything else here takes — under
+  // org.freedesktop.udisks2.ata-smart-update and its nvme twin.
+  //
+  // Best-effort, and deliberately not `|| continue`: a drive that refuses an
+  // update is still read, because a stale number beats no number. `nowakeup`
+  // goes to ATA, which is the interface that takes it, so a parked external
+  // disk is not spun up merely to draw a temperature. An NVMe has no heads to
+  // park and takes no such option.
+  readonly property string smartScript: [
+    'set -u',
+    'for dev; do',
+    '  echo "==> $dev <=="',
+    '  raw=$(busctl --timeout=20 call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager' +
+      ' org.freedesktop.UDisks2.Manager ResolveDevice "a{sv}a{sv}" 1 path s "$dev" 0 2>/dev/null) || continue',
+    '  obj=/${raw#*/}',
+    '  obj=${obj%?}',
+    '  case "$obj" in /org/freedesktop/UDisks2/block_devices/*) ;; *) continue ;; esac',
+    '  raw=$(busctl --timeout=20 get-property org.freedesktop.UDisks2 "$obj"' +
+      ' org.freedesktop.UDisks2.Block Drive 2>/dev/null) || continue',
+    '  drive=/${raw#*/}',
+    '  drive=${drive%?}',
+    '  case "$drive" in /org/freedesktop/UDisks2/drives/*) ;; *) continue ;; esac',
+    '  busctl --timeout=30 call org.freedesktop.UDisks2 "$drive"' +
+      ' org.freedesktop.UDisks2.Drive.Ata SmartUpdate "a{sv}" 1 nowakeup b true' +
+      ' >/dev/null 2>&1 || true',
+    '  for p in SmartFailing SmartTemperature SmartPowerOnSeconds SmartNumBadSectors' +
+      ' SmartSelftestStatus SmartUpdated; do',
+    '    v=$(busctl --timeout=20 get-property org.freedesktop.UDisks2 "$drive"' +
+      ' org.freedesktop.UDisks2.Drive.Ata "$p" 2>/dev/null) || continue',
+    '    echo "$p $v"',
+    '  done',
+    '  busctl --timeout=30 call org.freedesktop.UDisks2 "$drive"' +
+      ' org.freedesktop.UDisks2.NVMe.Controller SmartUpdate "a{sv}" 0 >/dev/null 2>&1 || true',
+    '  for p in SmartCriticalWarning SmartTemperature SmartPowerOnHours' +
+      ' SmartSelftestStatus SmartUpdated; do',
+    '    v=$(busctl --timeout=20 get-property org.freedesktop.UDisks2 "$drive"' +
+      ' org.freedesktop.UDisks2.NVMe.Controller "$p" 2>/dev/null) || continue',
+    '    echo "$p $v"',
+    '  done',
+    'done'
+  ].join("\n")
+
+  // Read once when the set of attached drives changes, and on an explicit
+  // rescan. Never on the free-space timer: refreshing it is a round trip to
+  // the drive itself, and every answer but the temperature changes over hours
+  // rather than seconds. The temperature is therefore a snapshot from the last
+  // read, which is what the health icon re-reads on a click.
+  function probeSmart() {
+    if (smartProcess.running) return
+    var paths = []
+    for (var i = 0; i < devices.length; i++) paths.push(devices[i].path)
+    paths.sort()
+    var signature = paths.join(",")
+    if (signature === _smartSignature) return
+    _smartSignature = signature
+    if (paths.length === 0) {
+      smart = ({})
+      return
+    }
+    var command = ["bash", "-c", smartScript, "removable-drives"]
+    for (var p = 0; p < paths.length; p++) command.push(paths[p])
+    smartProcess.command = command
+    smartProcess.running = true
+  }
+
+  function smartFor(device) {
+    if (!device) return null
+    return smart[device.path] || null
+  }
+
+  function smartVerdictFor(device) {
+    return Model.smartVerdict(smartFor(device))
+  }
+
+  function smartHintFor(device) {
+    return Model.smartHint(smartFor(device))
+  }
+
+  // Folded into `status` the way a check's verdict is, keyed by device path so
+  // a script with two drives attached can tell which one it is reading.
+  function healthReport() {
+    var out = {}
+    for (var i = 0; i < devices.length; i++) {
+      out[devices[i].path] = Model.smartVerdict(smartFor(devices[i]))
+    }
+    return out
   }
 
   // ------------------------------------------------ phones and cameras
@@ -1171,6 +1576,22 @@ Item {
   }
 
   Process {
+    id: hooksProcess
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyHooks(text)
+    }
+  }
+
+  Process {
+    id: smartProcess
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.smart = Model.parseSmartReport(text)
+    }
+  }
+
+  Process {
     id: blockersProcess
     stdout: StdioCollector {
       waitForEnd: true
@@ -1207,6 +1628,11 @@ Item {
           root.notify("Safe to remove",
                       root._successMessage.replace(/^Safe to remove /, ""),
                       Model.GLYPH_EJECT)
+        }
+        // Worth a notification of its own: a full erase runs long enough that
+        // the panel is usually shut by the time it finishes.
+        if (action === "format") {
+          root.notify("Formatted", root._successMessage.replace(/^Formatted /, ""), Model.GLYPH_ERASER)
         }
         if (action === "check" || action === "repair") root.applyVerdict(action, path)
         if (exitCode === Model.EXIT_REMOUNT_FAILED) {
@@ -1361,13 +1787,17 @@ Item {
   }
 
   // I/O counters are only sampled while something removable is attached, so
-  // the widget costs nothing on a machine with no drive plugged in.
+  // the widget costs nothing on a machine with no drive plugged in. A hook is
+  // read on the same tick, and only for a drive that has one still working.
   Timer {
     interval: 1000
     running: root.devices.length > 0
     repeat: true
     triggeredOnStart: true
-    onTriggered: root.sampleActivity()
+    onTriggered: {
+      root.sampleActivity()
+      root.sampleHooks()
+    }
   }
 
   // Free space drifts while a copy runs; only worth watching while the panel
