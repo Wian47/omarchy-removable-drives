@@ -142,6 +142,7 @@ device path and `$2` as its first mount point. Nothing writes it for you.
 
 ```bash
 omarchy-shell removable-drives toggle
+omarchy-shell removable-drives refresh                       # re-read what is attached
 omarchy-shell removable-drives list                          # drives, as JSON
 omarchy-shell removable-drives phones                        # phones, as JSON
 omarchy-shell removable-drives status                        # {"busy":false,…}

@@ -63,10 +63,13 @@ jobs:
           echo "nothing the capability scan would flag"
 
   qml:
-    name: QML syntax
+    name: QML syntax and wiring
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
 
       - name: Install the Qt QML tools
         run: |
@@ -98,3 +101,20 @@ jobs:
             fi
           done
           exit $status
+
+      # The checks that only break when one file disagrees with another: a call
+      # to a Model function that was renamed, a panel binding to a service
+      # property that is gone, a path reaching a shell unquoted, a scripting
+      # verb the README promises and the handler never grew, a setting that
+      # exists in two of its three places.
+      - name: Files still agree with each other
+        run: |
+          export PATH=/usr/lib/qt6/bin:$PATH
+          node test/wiring.test.js
+
+      # A check nobody has watched fail is a check nobody knows works. This
+      # breaks each invariant in a scratch copy and expects the check to catch it.
+      - name: The wiring checks catch what they claim to
+        run: |
+          export PATH=/usr/lib/qt6/bin:$PATH
+          bash test/prove-wiring.sh
