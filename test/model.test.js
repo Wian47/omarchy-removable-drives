@@ -1361,5 +1361,313 @@ test("only a locked encrypted volume can be unlocked", () => {
   assert.strictEqual(api.canUnlock(null), false)
 })
 
+console.log("\nwhat a connect hook reports")
+
+test("reads the two lines a hook is asked to write", () => {
+  const progress = api.parseHookProgress("percent=42\nstatus=Copying documents\n")
+  assert.strictEqual(progress.percent, 42)
+  assert.strictEqual(progress.status, "Copying documents")
+  assert.strictEqual(progress.done, false)
+})
+
+test("a bare number on its own line is a percent", () => {
+  // The laziest possible hook is `echo 60 > "$3"`, and it should work.
+  assert.strictEqual(api.parseHookProgress("60\n").percent, 60)
+  assert.strictEqual(api.parseHookProgress("60").status, "")
+})
+
+test("a percent outside nought to a hundred is brought back inside", () => {
+  assert.strictEqual(api.parseHookProgress("percent=140").percent, 100)
+  assert.strictEqual(api.parseHookProgress("percent=-5").percent, 0)
+})
+
+test("a fraction of a percent never rounds up into a finished copy", () => {
+  assert.strictEqual(api.parseHookProgress("percent=99.6").percent, 99)
+  assert.strictEqual(api.parseHookProgress("percent=0.9").percent, 0)
+})
+
+test("a hook reporting only a status has no percent to draw", () => {
+  const progress = api.parseHookProgress("status=Verifying")
+  assert.strictEqual(progress.percent, null)
+  assert.strictEqual(progress.status, "Verifying")
+})
+
+test("a percent nobody can read is no percent rather than nought", () => {
+  assert.strictEqual(api.parseHookProgress("percent=soon").percent, null)
+  assert.strictEqual(api.parseHookProgress("percent=").percent, null)
+})
+
+test("a status line is stripped like every other string a device supplies", () => {
+  // A hook's status carries filenames, and a filename contains anything.
+  const progress = api.parseHookProgress('status=Copying <img src="http://x/b.png">')
+  assert.ok(!progress.status.includes("<") && !progress.status.includes(">"), progress.status)
+})
+
+test("a status too long for the row is cut rather than allowed to overflow", () => {
+  const progress = api.parseHookProgress("status=" + "x".repeat(400))
+  assert.strictEqual(progress.status.length, 120)
+  assert.ok(progress.status.endsWith("…"))
+})
+
+test("a file with nothing readable in it is nothing, not an empty record", () => {
+  for (const raw of ["", "\n", "garbage", "no equals sign here", null, undefined]) {
+    assert.strictEqual(api.parseHookProgress(raw), null, JSON.stringify(raw))
+  }
+})
+
+test("only the hook may say it is done, never the percent on its own", () => {
+  assert.strictEqual(api.parseHookProgress("percent=100").done, false,
+    "an rsync sitting at 100% is still flushing")
+  assert.strictEqual(api.parseHookProgress("done=1").done, true)
+  assert.strictEqual(api.parseHookProgress("done=true").done, true)
+  assert.strictEqual(api.parseHookProgress("done=0").done, false)
+})
+
+test("a dead hook ends the progress it left sitting at 42 percent", () => {
+  // The case that lies: a hook killed mid-copy stops updating its file, and
+  // the last percent it wrote stays there forever.
+  const state = api.hookState({ percent: 42, status: "Copying documents", done: false }, false)
+  assert.strictEqual(state.active, false, "the process is gone, so the copy is over")
+  assert.strictEqual(state.done, true)
+  assert.strictEqual(state.percent, 42, "where it stopped is still worth reporting")
+})
+
+test("a hook still running is not finished, whatever percent it is at", () => {
+  const state = api.hookState({ percent: 100, status: "", done: false }, true)
+  assert.strictEqual(state.active, true)
+  assert.strictEqual(state.done, false)
+})
+
+test("a hook that says it is done is done, even before its process goes", () => {
+  const state = api.hookState({ percent: 80, status: "Tidying up", done: true }, true)
+  assert.strictEqual(state.active, false)
+  assert.strictEqual(state.done, true)
+})
+
+test("a hook that has written nothing yet is still running", () => {
+  const state = api.hookState(null, true)
+  assert.strictEqual(state.active, true)
+  assert.strictEqual(state.percent, null)
+  assert.strictEqual(state.status, "")
+})
+
+test("no hook at all is not a finished hook", () => {
+  const state = api.hookState(null, false)
+  assert.strictEqual(state.active, false)
+  assert.strictEqual(state.done, false, "nothing ran, so nothing finished")
+})
+
+test("the row says what the hook says, and says something when it says nothing", () => {
+  assert.strictEqual(api.hookLabel(api.hookState({ percent: 5, status: "Copying", done: false }, true)), "Copying")
+  assert.strictEqual(api.hookLabel(api.hookState({ percent: 5, status: "", done: false }, true)),
+    "Running its connect hook…")
+  assert.strictEqual(api.hookLabel(api.hookState({ percent: 5, status: "Copying", done: false }, false)), "",
+    "a finished hook leaves the row alone")
+  assert.strictEqual(api.hookLabel(null), "")
+})
+
+test("one poll answers for every drive, each with its own liveness", () => {
+  const raw = [
+    "==> serial_ABC123 1 <==",
+    "percent=42",
+    "status=Copying documents",
+    "==> serial_DEAD 0 <==",
+    "percent=100",
+    "==> serial_QUIET 1 <=="
+  ].join("\n")
+  const report = api.parseHookReport(raw)
+  assert.deepStrictEqual(Object.keys(report), ["serial_ABC123", "serial_DEAD", "serial_QUIET"])
+  assert.strictEqual(report["serial_ABC123"].active, true)
+  assert.strictEqual(report["serial_ABC123"].status, "Copying documents")
+  assert.strictEqual(report["serial_DEAD"].active, false, "the pid file is gone, so the hook is")
+  assert.strictEqual(report["serial_DEAD"].done, true)
+  assert.strictEqual(report["serial_QUIET"].active, true, "started, nothing written yet")
+})
+
+test("an empty or unreadable poll leaves no drive claiming a hook", () => {
+  assert.deepStrictEqual(api.parseHookReport(""), {})
+  assert.deepStrictEqual(api.parseHookReport("percent=50"), {},
+    "a body with no header belongs to no drive")
+})
+
+test("a progress file name cannot leave the directory it belongs in", () => {
+  // The drive key falls back to a device-supplied model string, and this names
+  // a path the plugin then creates and writes to.
+  assert.strictEqual(api.hookProgressName("serial:ABC123"), "serial_ABC123")
+  assert.strictEqual(api.hookProgressName("model:../../../etc/cron.d/x:0"),
+    "model_.._.._.._etc_cron.d_x_0")
+  assert.ok(!api.hookProgressName("model:a/b:1").includes("/"))
+  assert.strictEqual(api.hookProgressName("uuid:DEAD-BEEF"), "uuid_DEAD-BEEF")
+})
+
+test("a key that is nothing but dots gets no file name at all", () => {
+  assert.strictEqual(api.hookProgressName(".."), "")
+  assert.strictEqual(api.hookProgressName("."), "")
+  assert.strictEqual(api.hookProgressName(""), "")
+})
+
+console.log("\ndrive health")
+
+// Captured verbatim from `busctl get-property` against
+// org.freedesktop.UDisks2.NVMe.Controller on this machine.
+const SMART_NVME = [
+  "SmartCriticalWarning as 0",
+  "SmartTemperature q 306",
+  "SmartPowerOnHours t 1417",
+  'SmartSelftestStatus s "success"',
+  "SmartUpdated t 1788160679"
+].join("\n")
+
+// The ATA shape, which reports its temperature as a double and its age in
+// seconds rather than hours.
+const SMART_ATA = [
+  "SmartFailing b false",
+  "SmartTemperature d 305.15",
+  "SmartPowerOnSeconds t 7574400",
+  "SmartNumBadSectors x 0",
+  "SmartNumAttributesFailing i 0",
+  'SmartSelftestStatus s "success"',
+  "SmartUpdated t 1788160679"
+].join("\n")
+
+test("an NVMe temperature comes back in Celsius, not in Kelvin", () => {
+  const smart = api.parseSmart(SMART_NVME)
+  assert.strictEqual(smart.temperatureC, 32.8,
+    "306 is what the bus says; 306 degrees and 33 kelvin are both wrong")
+})
+
+test("an ATA temperature is the same unit through a different type", () => {
+  assert.strictEqual(api.parseSmart(SMART_ATA).temperatureC, 32.0)
+})
+
+test("a drive's age is reported in hours whichever way it counts", () => {
+  assert.strictEqual(api.parseSmart(SMART_NVME).powerOnHours, 1417)
+  assert.strictEqual(api.parseSmart(SMART_ATA).powerOnHours, 2104, "7574400 seconds is 2104 hours")
+})
+
+test("the rest of the record survives the round trip", () => {
+  const smart = api.parseSmart(SMART_NVME)
+  assert.strictEqual(smart.supported, true)
+  assert.strictEqual(smart.selftest, "success")
+  assert.strictEqual(smart.updatedAt, 1788160679)
+  assert.deepStrictEqual(smart.warnings, [])
+  const ata = api.parseSmart(SMART_ATA)
+  assert.strictEqual(ata.failing, false)
+  assert.strictEqual(ata.badSectors, 0)
+})
+
+test("a drive that carries neither interface reports nothing", () => {
+  // The common case, not the error case: a USB thumb drive has no SMART at all.
+  for (const raw of ["", "\n", null, undefined, "some unrelated output"]) {
+    const smart = api.parseSmart(raw)
+    assert.strictEqual(smart.supported, false, JSON.stringify(raw))
+    assert.strictEqual(smart.failing, null)
+    assert.strictEqual(smart.temperatureC, null)
+    assert.strictEqual(smart.powerOnHours, null)
+    assert.strictEqual(smart.badSectors, null)
+    assert.strictEqual(smart.selftest, null)
+    assert.strictEqual(smart.updatedAt, null)
+    assert.strictEqual(smart.warnings, null)
+  }
+})
+
+test("a drive with no health to report is unremarkable, not a warning", () => {
+  assert.strictEqual(api.smartVerdict(api.parseSmart("")), "unsupported")
+  assert.strictEqual(api.smartVerdict(null), "unsupported")
+  assert.strictEqual(api.smartHint(api.parseSmart("")), "",
+    "a thumb drive must not grow a health row it will never fill")
+})
+
+test("a drive with nothing wrong with it is healthy", () => {
+  assert.strictEqual(api.smartVerdict(api.parseSmart(SMART_NVME)), "healthy")
+  assert.strictEqual(api.smartVerdict(api.parseSmart(SMART_ATA)), "healthy")
+})
+
+test("a drive that says it is failing is failing", () => {
+  const smart = api.parseSmart(SMART_ATA.replace("SmartFailing b false", "SmartFailing b true"))
+  assert.strictEqual(smart.failing, true)
+  assert.strictEqual(api.smartVerdict(smart), "failing")
+})
+
+test("reallocated sectors are a warning, not a failure", () => {
+  const smart = api.parseSmart(SMART_ATA.replace("SmartNumBadSectors x 0", "SmartNumBadSectors x 4"))
+  assert.strictEqual(api.smartVerdict(smart), "warning",
+    "the drive has not given up, and saying it has would be overstating it")
+  assert.match(api.smartHint(smart), /4 reallocated sectors/)
+})
+
+test("an NVMe critical warning is a warning too", () => {
+  const smart = api.parseSmart(SMART_NVME.replace("SmartCriticalWarning as 0",
+    'SmartCriticalWarning as 1 "spare"'))
+  assert.deepStrictEqual(smart.warnings, ["spare"])
+  assert.strictEqual(api.smartVerdict(smart), "warning")
+  assert.match(api.smartHint(smart), /spare capacity is low/)
+})
+
+test("a critical-warning flag nobody has a sentence for is repeated verbatim", () => {
+  const smart = api.parseSmart('SmartCriticalWarning as 1 "something_new"')
+  assert.match(api.smartHint(smart), /something_new/)
+})
+
+test("several critical warnings are read as a list", () => {
+  const smart = api.parseSmart('SmartCriticalWarning as 2 "spare" "degraded"')
+  assert.deepStrictEqual(smart.warnings, ["spare", "degraded"])
+  assert.match(api.smartHint(smart), /spare capacity is low and its reliability is degraded/)
+})
+
+test("a self-test that ended in an error is not a healthy drive", () => {
+  for (const status of ["fatal", "error_read", "fatal_error", "known_seg_error"]) {
+    const smart = api.parseSmart(SMART_ATA.replace('"success"', '"' + status + '"'))
+    assert.strictEqual(api.smartVerdict(smart), "warning", status)
+  }
+})
+
+test("a self-test somebody cancelled is not evidence of anything", () => {
+  for (const status of ["success", "aborted", "interrupted", "inprogress", "ctrl_reset"]) {
+    const smart = api.parseSmart(SMART_ATA.replace('"success"', '"' + status + '"'))
+    assert.strictEqual(api.smartVerdict(smart), "healthy", status)
+  }
+})
+
+test("zero kelvin means udisks does not know, not absolute zero", () => {
+  const nvme = api.parseSmart("SmartTemperature q 0\nSmartPowerOnHours t 12")
+  assert.strictEqual(nvme.temperatureC, null)
+  assert.strictEqual(api.celsiusFromKelvin("0.0"), null)
+  assert.strictEqual(api.celsiusFromKelvin("nonsense"), null)
+})
+
+test("the hint prints the numbers rather than judging them", () => {
+  // No invented temperature threshold: a figure someone can read and look up
+  // beats a line drawn here on a guess.
+  const hint = api.smartHint(api.parseSmart(SMART_NVME))
+  assert.strictEqual(hint, "No problems reported · 32.8 °C · 1417 hours powered on")
+})
+
+test("a failing drive is told to its owner plainly", () => {
+  const smart = api.parseSmart(SMART_ATA.replace("SmartFailing b false", "SmartFailing b true"))
+  assert.match(api.smartHint(smart), /^This drive reports itself as failing/)
+})
+
+test("one probe answers for every attached drive", () => {
+  const raw = [
+    "==> /dev/sdb <==",
+    "==> /dev/sdc <==",
+    SMART_ATA,
+    "==> /dev/nvme0n1 <==",
+    SMART_NVME
+  ].join("\n")
+  const report = api.parseSmartReport(raw)
+  assert.deepStrictEqual(Object.keys(report), ["/dev/sdb", "/dev/sdc", "/dev/nvme0n1"])
+  assert.strictEqual(report["/dev/sdb"].supported, false, "a thumb drive answers with nothing")
+  assert.strictEqual(report["/dev/sdc"].powerOnHours, 2104)
+  assert.strictEqual(report["/dev/nvme0n1"].temperatureC, 32.8)
+})
+
+test("a drive udisks could not resolve reads as unsupported, not as an error", () => {
+  assert.deepStrictEqual(api.parseSmartReport(""), {})
+  const report = api.parseSmartReport("==> /dev/sdb <==\n")
+  assert.strictEqual(api.smartVerdict(report["/dev/sdb"]), "unsupported")
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

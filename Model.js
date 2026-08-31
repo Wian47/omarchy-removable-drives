@@ -742,6 +742,138 @@ function parseStore(raw) {
   }
 }
 
+// --------------------------------------------------------- connect hooks
+//
+// A drive can already run a command of the user's choosing when it appears,
+// and the panel had no way of knowing that command was running: an rsync to a
+// backup stick looked exactly like an idle drive, and the busy icon is no
+// substitute because kernel I/O goes quiet between an rsync's file batches.
+//
+// So the hook is handed a third argument, a file it may write progress to.
+// The format is key=value lines because a shell script has to be able to write
+// it with one echo and a person has to be able to read it:
+//
+//   percent=42
+//   status=Copying documents
+
+// The file is named after the drive key, and that key falls back to a
+// device-supplied model string — so it can carry a slash or a "..". It names a
+// path this plugin then creates and writes to, so it is reduced to characters
+// that cannot leave the directory it belongs in.
+function hookProgressName(key) {
+  var name = exact(key).replace(/[^A-Za-z0-9._-]/g, "_")
+  if (/^\.+$/.test(name)) return ""
+  return name.length > 120 ? name.substring(0, 120) : name
+}
+
+// A hook's status line routinely contains a filename, and a filename contains
+// anything — so it is hostile input for the same reason a drive label is, and
+// it is capped because a row has a width.
+var HOOK_STATUS_LIMIT = 120
+
+function hookStatusText(value) {
+  var text = plain(value)
+  return text.length > HOOK_STATUS_LIMIT ? text.substring(0, HOOK_STATUS_LIMIT - 1) + "…" : text
+}
+
+// Floored rather than rounded: 99.6 rounded up reads as a finished copy.
+function hookPercent(value) {
+  var text = clean(value)
+  if (text === "") return null
+  var n = Number(text)
+  if (!isFinite(n)) return null
+  return Math.max(0, Math.min(100, Math.floor(n)))
+}
+
+function parseHookProgress(raw) {
+  var percent = null
+  var status = ""
+  var done = false
+  var said = false
+  var lines = String(raw === undefined || raw === null ? "" : raw).split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var line = clean(lines[i])
+    if (line === "") continue
+    var pair = line.match(/^([A-Za-z]+)=(.*)$/)
+    if (!pair) {
+      // The laziest possible hook writes a bare number and nothing else.
+      if (/^\d+$/.test(line)) {
+        percent = hookPercent(line)
+        said = true
+      }
+      continue
+    }
+    var key = pair[1].toLowerCase()
+    if (key === "percent") {
+      percent = hookPercent(pair[2])
+      said = true
+    } else if (key === "status") {
+      status = hookStatusText(pair[2])
+      said = true
+    } else if (key === "done") {
+      done = /^(1|true|yes)$/i.test(clean(pair[2]))
+      said = true
+    }
+  }
+  if (!said) return null
+  return { percent: percent, status: status, done: done }
+}
+
+// Whether the hook is alive is a separate fact from what its file says, and it
+// is the more trustworthy of the two: a hook that dies mid-copy stops updating
+// its file and leaves the last percent sitting there forever. So the process
+// is what ends it, whatever the file still claims.
+function hookState(progress, running) {
+  var alive = running === true
+  var said = progress || null
+  var finished = said !== null && (said.done === true || !alive)
+  return {
+    active: alive && !(said !== null && said.done === true),
+    percent: said ? said.percent : null,
+    status: said ? said.status : "",
+    done: finished
+  }
+}
+
+// The sibling of activityLabel: what the row says while the hook runs. A hook
+// that reports nothing still gets a line, because the drive is being written
+// to and the silence is what the feature exists to end.
+function hookLabel(state) {
+  if (!state || !state.active) return ""
+  return state.status !== "" ? state.status : "Running its connect hook…"
+}
+
+// One poll covers every drive with a hook, the way the I/O sampler covers
+// every drive at once: a header line per drive carrying its liveness, then
+// whatever the hook wrote.
+function parseHookReport(raw) {
+  var out = {}
+  var lines = String(raw || "").split("\n")
+  var name = ""
+  var running = false
+  var body = []
+
+  function flush() {
+    if (name === "") return
+    out[name] = hookState(parseHookProgress(body.join("\n")), running)
+    name = ""
+    body = []
+  }
+
+  for (var i = 0; i < lines.length; i++) {
+    var header = lines[i].match(/^==>\s*(\S+)\s+([01])\s*<==\s*$/)
+    if (header) {
+      flush()
+      name = header[1]
+      running = header[2] === "1"
+      continue
+    }
+    if (name !== "") body.push(lines[i])
+  }
+  flush()
+  return out
+}
+
 // ------------------------------------------------------- phones & cameras
 //
 // A phone is not a block device — it speaks MTP, and gvfs is what mounts it.
@@ -1275,4 +1407,192 @@ function describeRepair(volume, repaired) {
   if (repaired === true) return "Repaired " + name
   if (repaired === false) return name + " could not be fully repaired"
   return "Could not tell whether " + name + " was repaired"
+}
+
+// ------------------------------------------------------------ drive health
+//
+// smartctl is the reflex and it is the wrong tool here: it wants root for most
+// devices, and smartmontools is not standard on Omarchy, so reaching for it
+// would break both "nothing runs as root" and "no extra packages". udisks
+// already does the privileged read and publishes the answer on the same
+// `allow_active` no-password path everything else here takes — on
+// org.freedesktop.UDisks2.Ata or org.freedesktop.UDisks2.NVMe.Controller,
+// depending on how the drive is attached.
+//
+// The fact that shapes this whole feature: a USB thumb drive carries neither
+// interface. Only external SSDs and hard drives behind a SAT-capable bridge
+// report health at all, so "this drive does not report health" is the common
+// answer, not the error path. It is a silence, not a warning, not a missing
+// dependency, and not a badge on a stick that will never have one.
+
+// udisks reports both drive temperatures in Kelvin — ATA as a double, NVMe as
+// a whole number — and reports 0 when it does not know, which is not −273 °C.
+//
+// The tenth is truncated rather than rounded, so the number on screen never
+// reads warmer than the one udisks handed over.
+var ZERO_CELSIUS_K = 273.15
+
+function celsiusFromKelvin(kelvin) {
+  var k = Number(clean(kelvin))
+  if (!isFinite(k) || k <= 0) return null
+  return Math.floor((k - ZERO_CELSIUS_K) * 10) / 10
+}
+
+function smartCount(value) {
+  var n = Number(clean(value))
+  if (!isFinite(n) || n < 0) return null
+  return Math.round(n)
+}
+
+// What udisks' NVMe critical-warning flags mean, since the bus reports each as
+// a single word a person has no way to expand. Anything not listed is repeated
+// as udisks named it rather than guessed at.
+var SMART_WARNINGS = {
+  "spare": "spare capacity is low",
+  "temperature": "its temperature is out of range",
+  "degraded": "its reliability is degraded",
+  "readonly": "it has gone read-only",
+  "volatile_mem": "its volatile memory backup failed",
+  "pmr_readonly": "its persistent memory region has gone read-only"
+}
+
+function smartWarningText(name) {
+  var key = clean(name).toLowerCase()
+  return SMART_WARNINGS[key] !== undefined ? SMART_WARNINGS[key] : key
+}
+
+// A self-test that ended in an error is evidence, and calling such a drive
+// healthy would be the overreach describeCheck already refuses to make. Only
+// the statuses naming an error count: one someone cancelled reads as
+// "aborted", and a drive is not sick for having been interrupted.
+function selftestFailed(status) {
+  var s = clean(status).toLowerCase()
+  if (s === "") return false
+  return s === "fatal" || s.indexOf("error") !== -1
+}
+
+// Each line is a property name, the type signature busctl printed, then the
+// value — "SmartTemperature q 306", "SmartFailing b false". The names are what
+// say which interface answered: SmartFailing and SmartPowerOnSeconds are ATA's,
+// SmartCriticalWarning and SmartPowerOnHours are NVMe's, and a drive carrying
+// neither interface answers with nothing at all.
+function parseSmart(raw) {
+  var smart = {
+    supported: false,
+    failing: null,
+    temperatureC: null,
+    powerOnHours: null,
+    badSectors: null,
+    selftest: null,
+    updatedAt: null,
+    warnings: null
+  }
+  var lines = String(raw || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var match = clean(lines[i]).match(/^(Smart[A-Za-z]+)\s+\S+\s*(.*)$/)
+    if (!match) continue
+    var name = match[1]
+    var value = match[2]
+
+    if (name === "SmartFailing") {
+      smart.failing = value === "true" ? true : (value === "false" ? false : null)
+    } else if (name === "SmartTemperature") {
+      smart.temperatureC = celsiusFromKelvin(value)
+    } else if (name === "SmartPowerOnHours") {
+      smart.powerOnHours = smartCount(value)
+    } else if (name === "SmartPowerOnSeconds") {
+      var seconds = smartCount(value)
+      smart.powerOnHours = seconds === null ? null : Math.floor(seconds / 3600)
+    } else if (name === "SmartNumBadSectors") {
+      smart.badSectors = smartCount(value)
+    } else if (name === "SmartSelftestStatus") {
+      smart.selftest = clean(value).replace(/"/g, "")
+    } else if (name === "SmartUpdated") {
+      var at = smartCount(value)
+      smart.updatedAt = at > 0 ? at : null
+    } else if (name === "SmartCriticalWarning") {
+      // "as 0" when clear, "as 2 \"spare\" \"temperature\"" when not.
+      var flags = []
+      var quoted = value.match(/"[^"]*"/g) || []
+      for (var q = 0; q < quoted.length; q++) {
+        var flag = clean(quoted[q].replace(/"/g, ""))
+        if (flag !== "") flags.push(flag)
+      }
+      smart.warnings = flags
+    } else {
+      continue
+    }
+    smart.supported = true
+  }
+  return smart
+}
+
+// One probe covers every attached drive, so the answers arrive with a header
+// naming the device each belongs to.
+function parseSmartReport(raw) {
+  var out = {}
+  var lines = String(raw || "").split("\n")
+  var path = ""
+  var body = []
+
+  function flush() {
+    if (path === "") return
+    out[path] = parseSmart(body.join("\n"))
+    path = ""
+    body = []
+  }
+
+  for (var i = 0; i < lines.length; i++) {
+    var header = lines[i].match(/^==>\s*(.+?)\s*<==\s*$/)
+    if (header) {
+      flush()
+      path = header[1]
+      continue
+    }
+    if (path !== "") body.push(lines[i])
+  }
+  flush()
+  return out
+}
+
+function smartVerdict(smart) {
+  if (!smart || smart.supported !== true) return "unsupported"
+  if (smart.failing === true) return "failing"
+  if (smart.badSectors > 0) return "warning"
+  if (smart.warnings && smart.warnings.length > 0) return "warning"
+  if (selftestFailed(smart.selftest)) return "warning"
+  return "healthy"
+}
+
+function smartConcern(smart) {
+  var bad = smart.badSectors
+  if (bad > 0) return bad === 1 ? "1 reallocated sector" : bad + " reallocated sectors"
+  var flags = smart.warnings || []
+  if (flags.length > 0) {
+    var said = []
+    for (var i = 0; i < flags.length; i++) said.push(smartWarningText(flags[i]))
+    return "The drive says " + joinNames(said)
+  }
+  return "Its last self-test ended in " + clean(smart.selftest)
+}
+
+// Nothing at all for a drive that does not report health, because that is most
+// of them and a row saying so on every thumb drive would be noise. Where there
+// is an answer, the temperature and the hours are printed rather than judged:
+// a threshold guessed at here would be worth less than a number someone can
+// read and look up.
+function smartHint(smart) {
+  var verdict = smartVerdict(smart)
+  if (verdict === "unsupported") return ""
+
+  var parts = []
+  if (verdict === "failing") parts.push("This drive reports itself as failing")
+  else if (verdict === "warning") parts.push(smartConcern(smart))
+  else parts.push("No problems reported")
+
+  if (smart.temperatureC !== null) parts.push(smart.temperatureC.toFixed(1) + " °C")
+  if (smart.powerOnHours !== null) {
+    parts.push(smart.powerOnHours + (smart.powerOnHours === 1 ? " hour" : " hours") + " powered on")
+  }
+  return parts.join(" · ")
 }
