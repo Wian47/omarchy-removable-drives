@@ -30,10 +30,11 @@ and the bar goes back to what it was.
   one thing here that rewrites a filesystem, so it appears only after a check
   has found something, never one stray click from the mount button. A suspect
   drive mounts read-only first, so files come off without a byte going back.
-- **Reads a drive's own health**, for the drives that report any. udisks
-  already does that read over D-Bus without root, so there is no extra package
-  and no `sudo`. Most USB sticks report nothing at all, and a drive that
-  reports nothing shows nothing — see below before expecting a number.
+- **Reads a drive's own health**, for the drives that report any. udisks does
+  that read over D-Bus and hands the answer over, so no extra package is
+  needed and nothing runs as root. Most USB sticks report nothing at all, and
+  a drive that reports nothing shows nothing — see below before expecting a
+  number.
 - **Unmounts before the machine sleeps**, optionally, so a drive pulled from a
   sleeping laptop is not left half-written, and says which one refused when
   one does.
@@ -185,6 +186,10 @@ and hours powered on in the tooltip and any concern written out in the row
 itself. It comes from udisks over D-Bus, which does the privileged read for
 us — no `smartctl`, no `smartmontools`, nothing running as root.
 
+The reading is taken when the drive appears and when you rescan, not
+continuously, so the temperature is a snapshot from that moment rather than a
+live thermometer. Clicking the health icon takes a fresh one.
+
 **Most USB sticks report nothing at all**, and that is the ordinary case rather
 than a fault: a thumb drive carries neither SMART interface, so the icon simply
 does not appear. External SSDs and hard drives behind a SAT-capable bridge are
@@ -244,11 +249,20 @@ name into it and an unlocked LUKS volume lands at `dm_2d3`. Both unmount the
 filesystem first and mount it back afterwards, whether or not the middle step
 worked.
 
-Health comes the same way, off `org.freedesktop.UDisks2.Ata` or
+Health comes the same way, off `org.freedesktop.UDisks2.Drive.Ata` or
 `org.freedesktop.UDisks2.NVMe.Controller` on the drive object — one further
-lookup, since health belongs to the drive rather than to a block device. It is
-read once when the attached set changes and again on a rescan, never on the
-free-space timer: it is a slow read and the answer changes over hours.
+lookup, since health belongs to the drive rather than to a block device.
+
+Reading those properties does not refresh them: udisks hands back whatever its
+own last poll cached, which measured ten minutes stale here — the bus said
+308 K while every sensor on the same drive said 36.85 °C. So `SmartUpdate` is
+called first, which is `allow_active: yes` in the udisks policy like everything
+else here. It is still read rarely — once when the attached set changes and
+again on a rescan, never on the free-space timer — because it is now a round
+trip to the drive itself, and because every answer but the temperature changes
+over hours rather than seconds. The update is best-effort: a drive that refuses
+one is still read, since a stale number beats no number. `nowakeup` goes to
+ATA, so a parked external disk is not spun up merely to draw a temperature.
 
 A LUKS passphrase reaches udisks on stdin, never as an argument, because
 `/proc/<pid>/cmdline` is readable by every other process you run. udisksctl
@@ -261,7 +275,7 @@ candidate of a mounted removable volume. The tests assert it refuses `/`,
 `$HOME`, the mount root, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 192 tests, no compositor required
+node test/model.test.js       # 193 tests, no compositor required
 omarchy plugin validate .     # the same check the shell applies
 ```
 

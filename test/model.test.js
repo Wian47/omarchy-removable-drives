@@ -1536,6 +1536,14 @@ test("an NVMe temperature comes back in Celsius, not in Kelvin", () => {
     "306 is what the bus says; 306 degrees and 33 kelvin are both wrong")
 })
 
+test("a second reading proves it is a conversion and not a fitted constant", () => {
+  // Both points were read off this machine's bus and checked against the same
+  // drive's hwmon sensors, which said 36.85 °C when the bus said 310 K.
+  assert.strictEqual(api.parseSmart("SmartTemperature q 310").temperatureC, 36.8)
+  assert.strictEqual(api.celsiusFromKelvin(310) - api.celsiusFromKelvin(306), 4,
+    "four kelvin apart is four degrees apart")
+})
+
 test("an ATA temperature is the same unit through a different type", () => {
   assert.strictEqual(api.parseSmart(SMART_ATA).temperatureC, 32.0)
 })

@@ -1416,8 +1416,11 @@ function describeRepair(volume, repaired) {
 // would break both "nothing runs as root" and "no extra packages". udisks
 // already does the privileged read and publishes the answer on the same
 // `allow_active` no-password path everything else here takes — on
-// org.freedesktop.UDisks2.Ata or org.freedesktop.UDisks2.NVMe.Controller,
+// org.freedesktop.UDisks2.Drive.Ata or org.freedesktop.UDisks2.NVMe.Controller,
 // depending on how the drive is attached.
+//
+// Neither interface refreshes itself on a read, so the caller updates it first;
+// the numbers below are only as current as whoever fetched them made them.
 //
 // The fact that shapes this whole feature: a USB thumb drive carries neither
 // interface. Only external SSDs and hard drives behind a SAT-capable bridge

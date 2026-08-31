@@ -1233,6 +1233,20 @@ Item {
   // The object path is resolved rather than built, the same way fsScript does
   // it — and health lives on the drive object rather than the block one, so it
   // takes the second lookup to get there.
+  //
+  // Reading the properties does not refresh them. udisks hands back whatever
+  // its own last poll cached, which measured ten minutes stale here: the bus
+  // said 308 K while every hwmon sensor on the same drive said 36.85 °C, a gap
+  // of two degrees that is staleness rather than arithmetic. So SmartUpdate is
+  // called first. It is `allow_active: yes` in the udisks policy — the same
+  // no-password path everything else here takes — under
+  // org.freedesktop.udisks2.ata-smart-update and its nvme twin.
+  //
+  // Best-effort, and deliberately not `|| continue`: a drive that refuses an
+  // update is still read, because a stale number beats no number. `nowakeup`
+  // goes to ATA, which is the interface that takes it, so a parked external
+  // disk is not spun up merely to draw a temperature. An NVMe has no heads to
+  // park and takes no such option.
   readonly property string smartScript: [
     'set -u',
     'for dev; do',
@@ -1247,12 +1261,17 @@ Item {
     '  drive=/${raw#*/}',
     '  drive=${drive%?}',
     '  case "$drive" in /org/freedesktop/UDisks2/drives/*) ;; *) continue ;; esac',
+    '  busctl --timeout=30 call org.freedesktop.UDisks2 "$drive"' +
+      ' org.freedesktop.UDisks2.Drive.Ata SmartUpdate "a{sv}" 1 nowakeup b true' +
+      ' >/dev/null 2>&1 || true',
     '  for p in SmartFailing SmartTemperature SmartPowerOnSeconds SmartNumBadSectors' +
       ' SmartSelftestStatus SmartUpdated; do',
     '    v=$(busctl --timeout=20 get-property org.freedesktop.UDisks2 "$drive"' +
-      ' org.freedesktop.UDisks2.Ata "$p" 2>/dev/null) || continue',
+      ' org.freedesktop.UDisks2.Drive.Ata "$p" 2>/dev/null) || continue',
     '    echo "$p $v"',
     '  done',
+    '  busctl --timeout=30 call org.freedesktop.UDisks2 "$drive"' +
+      ' org.freedesktop.UDisks2.NVMe.Controller SmartUpdate "a{sv}" 0 >/dev/null 2>&1 || true',
     '  for p in SmartCriticalWarning SmartTemperature SmartPowerOnHours' +
       ' SmartSelftestStatus SmartUpdated; do',
     '    v=$(busctl --timeout=20 get-property org.freedesktop.UDisks2 "$drive"' +
@@ -1263,8 +1282,10 @@ Item {
   ].join("\n")
 
   // Read once when the set of attached drives changes, and on an explicit
-  // rescan. Never on the free-space timer: it is a slow privileged read and
-  // the answer changes over hours rather than seconds.
+  // rescan. Never on the free-space timer: refreshing it is a round trip to
+  // the drive itself, and every answer but the temperature changes over hours
+  // rather than seconds. The temperature is therefore a snapshot from the last
+  // read, which is what the health icon re-reads on a click.
   function probeSmart() {
     if (smartProcess.running) return
     var paths = []
