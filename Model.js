@@ -40,6 +40,8 @@ var GLYPH_STETHOSCOPE = codepoint(0xF04D9) // md-stethoscope
 var GLYPH_WRENCH = codepoint(0xF05B7)    // md-wrench
 var GLYPH_HEALTHY = codepoint(0xF05E0)   // md-check_circle
 var GLYPH_READONLY = codepoint(0xF0250)  // md-folder_lock
+var GLYPH_ERASER = codepoint(0xF01FE)    // md-eraser
+var GLYPH_FOLDER_OFF = codepoint(0xF19F8) // md-folder_off
 
 // ------------------------------------------------------------ formatting
 
@@ -130,6 +132,10 @@ function isCandidateDisk(node) {
   return node.rm === true || node.hotplug === true
 }
 
+// Takes an lsblk node or a built device: the children of the one and the
+// volumes of the other are the same partitions under different names, and the
+// question is asked on both sides of parsing — once to drop the disk the
+// machine is running from, and again before anything destructive is offered.
 function holdsSystemMount(node) {
   if (!node) return false
   var mp = exact(node.mountpoint)
@@ -141,6 +147,10 @@ function holdsSystemMount(node) {
   var kids = node.children || []
   for (var i = 0; i < kids.length; i++) {
     if (holdsSystemMount(kids[i])) return true
+  }
+  var volumes = node.volumes || []
+  for (var v = 0; v < volumes.length; v++) {
+    if (holdsSystemMount(volumes[v])) return true
   }
   return false
 }
@@ -236,6 +246,11 @@ function buildDevice(node) {
     path: exact(node.path),
     name: exact(node.name),
     serial: exact(node.serial),
+    // Carried rather than recomputed later: only the lsblk node knows this,
+    // and by the time a format is being considered the node is long gone. A
+    // device object without it never came from a scan, and nothing
+    // destructive is offered on one.
+    removable: isCandidateDisk(node),
     title: deviceTitle(node),
     nickname: "",
     key: "",
@@ -700,6 +715,41 @@ function driveSettings(store, device) {
   return store.drives[key] || {}
 }
 
+// Two of the saved fields decide how a drive mounts rather than what it is
+// called, so an unreadable value has to answer for itself. The file is
+// hand-edited, and the two fail in opposite directions: a drive whose owner
+// asked for read-only must not be mounted writable because of a typo, while a
+// broken autoOpen only ever decides whether a window opens and can safely fall
+// back to what every other drive does.
+function readOnlyPolicy(value) {
+  if (value === undefined || value === null) return false
+  return value !== false
+}
+
+// null is "follow the global openOnMount". Tri-state rather than boolean,
+// because a per-drive false as the default would override a global true for
+// every drive that has ever been given a nickname.
+function autoOpenPolicy(value) {
+  if (value === true || value === false) return value
+  return null
+}
+
+function shouldMountReadOnly(store, device) {
+  return readOnlyPolicy(driveSettings(store, device).readOnly)
+}
+
+function shouldOpenOnMount(store, device, globalDefault) {
+  var saved = autoOpenPolicy(driveSettings(store, device).autoOpen)
+  return saved === null ? globalDefault === true : saved
+}
+
+// Where the drive row's open-after-mount button lands next: follow the global
+// setting, always open, never open, and back round.
+function nextAutoOpen(value) {
+  if (autoOpenPolicy(value) === null) return true
+  return value === true ? false : null
+}
+
 // Nicknames are applied after parsing so everything downstream — the panel,
 // the bar label, notifications — says the name the user chose without each
 // caller having to remember to look it up.
@@ -732,11 +782,37 @@ function withDriveSetting(store, device, name, value) {
   return next
 }
 
+// One saved drive, as it is allowed to exist in memory. Fields this plugin
+// does not know about are carried through untouched — the file belongs to the
+// user — but the two that decide how the drive mounts are read through their
+// own policy rather than believed, so a typo cannot reach a mount command.
+function driveRecord(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null
+  var out = {}
+  for (var name in entry) {
+    if (name !== "readOnly" && name !== "autoOpen") out[name] = entry[name]
+  }
+  if (entry.readOnly !== undefined && entry.readOnly !== null) {
+    out.readOnly = readOnlyPolicy(entry.readOnly)
+  }
+  var autoOpen = autoOpenPolicy(entry.autoOpen)
+  if (autoOpen !== null) out.autoOpen = autoOpen
+  return out
+}
+
 function parseStore(raw) {
   try {
     var parsed = JSON.parse(String(raw || "").replace(/^\s+|\s+$/g, "") || "{}")
     if (!parsed || typeof parsed !== "object") return { version: 1, drives: {} }
-    return { version: 1, drives: parsed.drives || {} }
+    var saved = parsed.drives
+    var drives = {}
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+      for (var key in saved) {
+        var record = driveRecord(saved[key])
+        if (record !== null && Object.keys(record).length > 0) drives[key] = record
+      }
+    }
+    return { version: 1, drives: drives }
   } catch (e) {
     return { version: 1, drives: {} }
   }
@@ -1115,11 +1191,22 @@ function labelRemaining(volume, label) {
 // Lines read `CanCheck vfat (bs) true ""` or `CanRepair ntfs (bs) false
 // "ntfsfix"`. A filesystem udisks will not fsck at all answers with an error
 // rather than a value, and the probe echoes the bare `CanCheck nilfs2` back.
+//
+// The same probe carries the Manager's own SupportedFilesystems on a
+// `Supported as 12 "ext2" "ext3" …` line, which is the only list a format is
+// ever allowed to choose from — a type udisks does not name here cannot reach
+// the bus at all.
 function parseFsCapabilities(raw) {
-  var caps = { check: {}, repair: {} }
+  var caps = { check: {}, repair: {}, format: [] }
   var lines = String(raw || "").split("\n")
   for (var i = 0; i < lines.length; i++) {
-    var match = clean(lines[i]).match(/^Can(Check|Repair)\s+(\S+)(?:\s+\(bs\)\s+(true|false)\s+"([^"]*)")?$/)
+    var line = clean(lines[i])
+    var supported = line.match(/^Supported\b(.*)$/)
+    if (supported) {
+      caps.format = quotedList(supported[1])
+      continue
+    }
+    var match = line.match(/^Can(Check|Repair)\s+(\S+)(?:\s+\(bs\)\s+(true|false)\s+"([^"]*)")?$/)
     if (!match) continue
     var bucket = match[1] === "Check" ? caps.check : caps.repair
     bucket[match[2]] = match[3] === undefined
@@ -1127,6 +1214,19 @@ function parseFsCapabilities(raw) {
       : { supported: true, available: match[3] === "true", missing: match[4] || "" }
   }
   return caps
+}
+
+// busctl prints an array of strings as its signature, a count, then the
+// quoted values. Reading the quotes rather than splitting on spaces keeps a
+// count or a stray field from being mistaken for a filesystem name.
+function quotedList(text) {
+  var out = []
+  var found = String(text === undefined || text === null ? "" : text).match(/"[^"]*"/g) || []
+  for (var i = 0; i < found.length; i++) {
+    var value = clean(found[i].replace(/^"|"$/g, ""))
+    if (value !== "") out.push(value)
+  }
+  return out
 }
 
 function fsCapability(caps, kind, fstype) {
@@ -1275,4 +1375,130 @@ function describeRepair(volume, repaired) {
   if (repaired === true) return "Repaired " + name
   if (repaired === false) return name + " could not be fully repaired"
   return "Could not tell whether " + name + " was repaired"
+}
+
+// ------------------------------------------------- creating a filesystem
+//
+// The one action here that destroys data on purpose. So it is not a call with
+// four arguments that each get checked somewhere along the way — it is a plan,
+// { fsPath, fstype, label, quick }, approved as a whole before any part of it
+// reaches the bus. The fsPath is in the plan for the same reason a repair
+// carries a UUID: a /dev path is reusable, and a plan made while one stick was
+// in the socket must not run against the one that replaced it.
+
+// udisks will create twelve filesystems. These are the five worth offering —
+// what someone moving a stick between machines actually wants — in the order
+// they want them. swap and the raid member types are absent on purpose: a
+// removable drive is not where either belongs, and neither is a mistake anyone
+// makes deliberately from a panel.
+var FORMAT_TYPES = ["exfat", "vfat", "ntfs", "ext4", "btrfs"]
+
+function formatTypes(caps) {
+  var supported = (caps && caps.format) || []
+  var out = []
+  for (var i = 0; i < FORMAT_TYPES.length; i++) {
+    if (supported.indexOf(FORMAT_TYPES[i]) !== -1) out.push(FORMAT_TYPES[i])
+  }
+  return out
+}
+
+// A stand-in for the volume that does not exist yet, so the label rules answer
+// for the filesystem the drive is about to have rather than the one it is
+// losing: an ext4 stick being made exFAT loses five characters of label
+// ceiling, and the field has to count down against the new number while it is
+// still open.
+function formatTarget(fstype) {
+  var fs = clean(fstype)
+  return { fstype: fs, fstypeLabel: formatFsType(fs), encrypted: false, unlocked: false }
+}
+
+// The pairing the panel drew: this volume is one of the ones on that drive.
+function tracksVolume(device, volume) {
+  var target = exact(volume ? volume.fsPath : "")
+  if (target === "") return false
+  var volumes = (device && device.volumes) || []
+  for (var i = 0; i < volumes.length; i++) {
+    if (exact(volumes[i].fsPath) === target) return true
+  }
+  return false
+}
+
+// Why this volume may not be formatted, or null when it may. Everything the
+// pure layer can see is answered here. Whether the drive is still being
+// written to and whether another action is already running are the service's
+// to add: neither is in the lsblk tree.
+//
+// The mount is refused rather than dealt with. Every other action here
+// unmounts the filesystem and puts it back; this one asks the person to do it,
+// because unmounting a drive on the way to erasing it is one step too many to
+// take on somebody's behalf.
+function canFormat(caps, volume, device) {
+  if (!volume) return "No volume selected"
+  if (holdsSystemMount(volume) || holdsSystemMount(device)) {
+    return "That drive is holding a system mount"
+  }
+  if (!device || device.removable !== true || isVirtual(device.name) || !tracksVolume(device, volume)) {
+    return "That volume is not on a removable drive this panel tracks"
+  }
+  if (volume.mounted) return "Unmount " + volume.title + " first"
+  if (volume.encrypted && volume.unlocked) {
+    return "Lock " + volume.title + " before formatting it"
+  }
+  if (formatTypes(caps).length === 0) {
+    return "udisks has not said which filesystems it can create"
+  }
+  return null
+}
+
+function validateFormat(caps, volume, device, plan) {
+  var refusal = canFormat(caps, volume, device)
+  if (refusal !== null) return { ok: false, reason: refusal }
+  if (!plan) return { ok: false, reason: "No format was planned" }
+  if (exact(plan.fsPath) !== exact(volume.fsPath)) {
+    return { ok: false, reason: "That format was planned for a different volume" }
+  }
+  if (plan.quick !== true && plan.quick !== false) {
+    return { ok: false, reason: "A format has to say whether to erase the drive first" }
+  }
+
+  var fstype = clean(plan.fstype)
+  if (fstype === "") return { ok: false, reason: "Choose a filesystem to create" }
+  if (formatTypes(caps).indexOf(fstype) === -1) {
+    return { ok: false, reason: formatFsType(fstype) + " cannot be created here" }
+  }
+
+  var label = validateLabel(formatTarget(fstype), plan.label)
+  if (!label.ok) return { ok: false, reason: label.message }
+  return { ok: true, reason: "" }
+}
+
+// What has to be typed before the format runs: the kernel name of the volume,
+// not its label. It is short, it is what lsblk and dmesg call the same thing,
+// and unlike the label nobody chose it — a stick labelled with a single space,
+// or labelled to be retyped without looking, cannot water the confirmation
+// down.
+function formatToken(volume) {
+  return exact(volume ? volume.name : "")
+}
+
+function formatConfirmed(volume, typed) {
+  var token = formatToken(volume)
+  if (token === "") return false
+  return normaliseLabel(typed) === token
+}
+
+// The sentence above that field. It names the volume and the size of what is
+// going, because a second "are you sure?" over a drive nobody looked at twice
+// is how the wrong stick gets erased.
+function formatWarning(volume) {
+  if (!volume) return ""
+  var size = formatBytes(volume.sizeBytes)
+  return "Erases " + volume.title + (size !== "" ? " — " + size : "") +
+         " on " + exact(volume.fsPath) + ". Nothing brings it back."
+}
+
+function describeFormat(volume, fstype) {
+  var name = volume ? volume.title : "the volume"
+  var fs = formatFsType(fstype)
+  return "Formatted " + name + (fs !== "" ? " as " + fs : "")
 }

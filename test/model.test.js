@@ -491,6 +491,89 @@ test("a corrupt or missing state file reads as empty, not as a crash", () => {
   assert.deepStrictEqual(api.parseStore('{"drives":{"serial:A":{"nickname":"X"}}}').drives, { "serial:A": { nickname: "X" } })
 })
 
+console.log("\nper-drive mount policy")
+
+const POLICY_DRIVE = api.parse(tree([disk({ serial: "ABC123", children: [part({})] })]))[0]
+
+function saved(fields) {
+  return { version: 1, drives: { "serial:ABC123": fields } }
+}
+
+test("a drive with nothing saved follows the global open-after-mount setting", () => {
+  assert.strictEqual(api.shouldOpenOnMount(saved({}), POLICY_DRIVE, true), true)
+  assert.strictEqual(api.shouldOpenOnMount(saved({}), POLICY_DRIVE, false), false)
+  assert.strictEqual(api.shouldOpenOnMount(null, POLICY_DRIVE, true), true)
+  assert.strictEqual(api.shouldOpenOnMount(saved({}), null, true), true)
+})
+
+test("a drive told to open always opens, whatever the global setting says", () => {
+  assert.strictEqual(api.shouldOpenOnMount(saved({ autoOpen: true }), POLICY_DRIVE, false), true)
+})
+
+test("a drive told not to open never opens, whatever the global setting says", () => {
+  assert.strictEqual(api.shouldOpenOnMount(saved({ autoOpen: false }), POLICY_DRIVE, true), false)
+})
+
+test("an autoOpen nobody can read falls back to the global setting rather than guessing", () => {
+  for (const typo of ["true", "yes", 1, 0, {}, []]) {
+    assert.strictEqual(api.shouldOpenOnMount(saved({ autoOpen: typo }), POLICY_DRIVE, true), true,
+      JSON.stringify(typo) + " should follow the global true")
+    assert.strictEqual(api.shouldOpenOnMount(saved({ autoOpen: typo }), POLICY_DRIVE, false), false,
+      JSON.stringify(typo) + " should follow the global false")
+  }
+})
+
+test("a drive mounts writable unless it was asked not to", () => {
+  assert.strictEqual(api.shouldMountReadOnly(saved({}), POLICY_DRIVE), false)
+  assert.strictEqual(api.shouldMountReadOnly(saved({ readOnly: false }), POLICY_DRIVE), false)
+  assert.strictEqual(api.shouldMountReadOnly(null, POLICY_DRIVE), false)
+  assert.strictEqual(api.shouldMountReadOnly(saved({ readOnly: true }), null), false)
+})
+
+test("a drive marked read-only mounts read-only", () => {
+  assert.strictEqual(api.shouldMountReadOnly(saved({ readOnly: true }), POLICY_DRIVE), true)
+})
+
+test("a readOnly nobody can read keeps the drive read-only rather than mounting it writable", () => {
+  for (const typo of ["false", "no", 0, "", {}]) {
+    assert.strictEqual(api.shouldMountReadOnly(saved({ readOnly: typo }), POLICY_DRIVE), true,
+      JSON.stringify(typo) + " is not the word false, and an archive drive is not written to on a maybe")
+  }
+})
+
+test("the state file is read through the same rules the mount is", () => {
+  const store = api.parseStore('{"drives":{"serial:A":{"readOnly":"yes","autoOpen":"maybe","nickname":"Archive"}}}')
+  assert.deepStrictEqual(store.drives["serial:A"], { nickname: "Archive", readOnly: true },
+    "an unreadable readOnly stays read-only; an unreadable autoOpen goes back to the global setting")
+})
+
+test("a hand-edited boolean is kept exactly as it was written", () => {
+  const store = api.parseStore('{"drives":{"serial:A":{"readOnly":false,"autoOpen":false}}}')
+  assert.deepStrictEqual(store.drives["serial:A"], { readOnly: false, autoOpen: false })
+})
+
+test("an autoOpen written as null is the same as leaving it out", () => {
+  const store = api.parseStore('{"drives":{"serial:A":{"autoOpen":null,"nickname":"X"}}}')
+  assert.deepStrictEqual(store.drives["serial:A"], { nickname: "X" })
+})
+
+test("a drive record that is not a record at all is dropped, not carried", () => {
+  const store = api.parseStore('{"drives":{"serial:A":"read-only please","serial:B":["x"],"serial:C":{"nickname":"Keep"}}}')
+  assert.deepStrictEqual(store.drives, { "serial:C": { nickname: "Keep" } })
+})
+
+test("a record left with nothing in it does not linger in the file", () => {
+  assert.deepStrictEqual(api.parseStore('{"drives":{"serial:A":{"autoOpen":"maybe"}}}').drives, {})
+})
+
+test("the open-after-mount button cycles follow, always, never, and back", () => {
+  assert.strictEqual(api.nextAutoOpen(null), true)
+  assert.strictEqual(api.nextAutoOpen(undefined), true)
+  assert.strictEqual(api.nextAutoOpen(true), false)
+  assert.strictEqual(api.nextAutoOpen(false), null)
+  assert.strictEqual(api.nextAutoOpen("maybe"), true, "an unreadable value is already following the global setting")
+})
+
 console.log("\nphones and cameras")
 
 // Shape of `gio mount -li` with a phone attached: gvfs reports the same
@@ -1172,6 +1255,217 @@ test("nothing checked authorises nothing", () => {
   assert.strictEqual(api.repairAuthorised({ fsPath: "", uuid: "", verdict: false }, SAME), false)
   assert.strictEqual(api.repairAuthorised(null, SAME), false)
   assert.strictEqual(api.repairAuthorised(CHECKED, null), false)
+})
+
+console.log("\nformatting a volume")
+
+// What udisks answered on the target machine, off the same probe that asks
+// about fsck: the supported list arrives beside CanCheck and CanRepair.
+const FORMAT_CAPS = api.parseFsCapabilities([
+  'Supported as 12 "ext2" "ext3" "ext4" "xfs" "vfat" "ntfs" "f2fs" "nilfs2" "exfat" "btrfs" "udf" "swap"',
+  'CanCheck vfat (bs) true ""'
+].join("\n"))
+
+function stick(overrides) {
+  return api.parse(tree([disk({ serial: "ABC123", children: [part(overrides || {})] })]))[0]
+}
+
+function plan(overrides) {
+  return Object.assign({ fsPath: "/dev/sdb1", fstype: "exfat", label: "PHOTOS", quick: true }, overrides)
+}
+
+const FORMAT_DRIVE = stick({})
+const FORMAT_VOLUME = FORMAT_DRIVE.volumes[0]
+
+test("the supported list comes off the probe rather than out of this file", () => {
+  assert.deepStrictEqual(FORMAT_CAPS.format,
+    ["ext2", "ext3", "ext4", "xfs", "vfat", "ntfs", "f2fs", "nilfs2", "exfat", "btrfs", "udf", "swap"])
+  assert.strictEqual(FORMAT_CAPS.check.vfat.available, true, "the fsck answers still parse alongside it")
+})
+
+test("offers the filesystems worth putting on a stick, in a stable order", () => {
+  assert.deepStrictEqual(api.formatTypes(FORMAT_CAPS), ["exfat", "vfat", "ntfs", "ext4", "btrfs"])
+})
+
+test("never offers swap or a raid member, whatever udisks says it can create", () => {
+  const offered = api.formatTypes(api.parseFsCapabilities(
+    'Supported as 3 "swap" "linux_raid_member" "exfat"'))
+  assert.deepStrictEqual(offered, ["exfat"])
+})
+
+test("a type udisks did not name is not offered either", () => {
+  assert.deepStrictEqual(api.formatTypes(api.parseFsCapabilities('Supported as 2 "ext4" "vfat"')),
+    ["vfat", "ext4"])
+})
+
+test("nothing is offered until udisks has said what it can create", () => {
+  assert.deepStrictEqual(api.formatTypes(api.parseFsCapabilities("")), [])
+  assert.deepStrictEqual(api.formatTypes({}), [])
+  assert.deepStrictEqual(api.formatTypes(null), [])
+})
+
+test("the system-mount rule reads a built drive as well as an lsblk node", () => {
+  assert.strictEqual(api.holdsSystemMount({ name: "sdb", volumes: [{ mountpoint: "/home" }] }), true)
+  assert.strictEqual(api.holdsSystemMount({ name: "sdb", volumes: [{ mountpoint: "/run/media/x/A" }] }), false)
+})
+
+test("a drive holding a system mount is refused before anything else about it", () => {
+  const device = {
+    name: "sdb", path: "/dev/sdb", volumes: [
+      { fsPath: "/dev/sdb1", name: "sdb1", title: "DATA", mounted: false, mountpoint: "" },
+      { fsPath: "/dev/sdb2", name: "sdb2", title: "root", mounted: true, mountpoint: "/" }
+    ]
+  }
+  assert.match(api.canFormat(FORMAT_CAPS, device.volumes[0], device), /system mount/,
+    "the unmounted partition beside / is on the disk running the machine")
+})
+
+test("a volume mounted at a system path is refused as one", () => {
+  const volume = { fsPath: "/dev/sdb1", name: "sdb1", title: "boot", mounted: true, mountpoint: "/boot" }
+  const device = { name: "sdb", path: "/dev/sdb", volumes: [volume] }
+  assert.match(api.canFormat(FORMAT_CAPS, volume, device), /system mount/)
+})
+
+test("a volume that is not on the drive it was handed with is refused", () => {
+  const other = stick({ name: "sdc1", path: "/dev/sdc1" })
+  assert.match(api.canFormat(FORMAT_CAPS, FORMAT_VOLUME, other), /not on a removable drive/)
+  assert.match(api.canFormat(FORMAT_CAPS, FORMAT_VOLUME, null), /not on a removable drive/)
+})
+
+test("a device-mapper node is not a removable drive this panel formats", () => {
+  const device = { name: "dm-0", path: "/dev/dm-0", removable: true, volumes: [FORMAT_VOLUME] }
+  assert.match(api.canFormat(FORMAT_CAPS, FORMAT_VOLUME, device), /not on a removable drive/)
+})
+
+test("a drive that never came out of a scan is not formattable at all", () => {
+  const device = { name: "sdb", path: "/dev/sdb", volumes: [FORMAT_VOLUME] }
+  assert.match(api.canFormat(FORMAT_CAPS, FORMAT_VOLUME, device), /not on a removable drive/,
+    "removability is only knowable from the lsblk node, so a device without the answer is refused")
+  assert.strictEqual(FORMAT_DRIVE.removable, true, "one that did come out of a scan carries it")
+})
+
+test("a mounted volume is refused rather than unmounted on the way", () => {
+  const drive = stick({ mountpoint: "/run/media/wian47/STICK" })
+  assert.strictEqual(api.canFormat(FORMAT_CAPS, drive.volumes[0], drive), "Unmount STICK first")
+})
+
+test("an open encrypted container is locked first, not formatted through", () => {
+  const drive = api.parse(tree([disk({ children: [part({
+    fstype: "crypto_LUKS", label: null,
+    children: [{ name: "luks-x", path: "/dev/mapper/luks-x", type: "crypt", fstype: "ext4",
+                 label: "VAULT", mountpoint: null, children: [] }]
+  })] })]))[0]
+  assert.strictEqual(api.canFormat(FORMAT_CAPS, drive.volumes[0], drive),
+    "Lock VAULT before formatting it")
+})
+
+test("a locked container can be erased, because that is how an encrypted stick is reused", () => {
+  const drive = stick({ fstype: "crypto_LUKS", label: null })
+  assert.strictEqual(api.canFormat(FORMAT_CAPS, drive.volumes[0], drive), null)
+})
+
+test("nothing is formattable while udisks has not said what it can create", () => {
+  assert.match(api.canFormat(api.parseFsCapabilities(""), FORMAT_VOLUME, FORMAT_DRIVE), /has not said/)
+})
+
+test("a volume that clears every rule is allowed", () => {
+  assert.strictEqual(api.canFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE), null)
+  assert.strictEqual(api.canFormat(FORMAT_CAPS, null, FORMAT_DRIVE), "No volume selected")
+})
+
+test("every refusal canFormat has is a refusal the plan has", () => {
+  const drive = stick({ mountpoint: "/run/media/wian47/STICK" })
+  const result = api.validateFormat(FORMAT_CAPS, drive.volumes[0], drive, plan({}))
+  assert.strictEqual(result.ok, false)
+  assert.strictEqual(result.reason, api.canFormat(FORMAT_CAPS, drive.volumes[0], drive))
+})
+
+test("a plan aimed at a volume other than the one it is checked against is refused", () => {
+  const result = api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ fsPath: "/dev/sdb2" }))
+  assert.strictEqual(result.ok, false)
+  assert.match(result.reason, /planned for a different volume/,
+    "a /dev path is reusable, so a plan made for one stick must not run against its replacement")
+})
+
+test("a plan that does not say whether to erase the drive first is refused", () => {
+  for (const quick of [undefined, null, "yes", 1]) {
+    assert.strictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ quick })).ok,
+      false, String(quick))
+  }
+})
+
+test("a filesystem udisks cannot create is refused by name", () => {
+  const result = api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ fstype: "swap" }))
+  assert.strictEqual(result.ok, false)
+  assert.match(result.reason, /cannot be created here/)
+})
+
+test("no filesystem chosen is its own answer rather than a silent default", () => {
+  assert.match(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ fstype: "" })).reason,
+    /Choose a filesystem/)
+})
+
+test("the label is counted against the filesystem being created, not the one being replaced", () => {
+  const roomy = api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE,
+    plan({ fstype: "ext4", label: "SIXTEEN CHARSXX" }))
+  assert.strictEqual(roomy.ok, true, "the volume is FAT32 today, but ext4 takes sixteen characters")
+
+  const tight = api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE,
+    plan({ fstype: "exfat", label: "SIXTEEN CHARSXX" }))
+  assert.strictEqual(tight.ok, false)
+  assert.match(tight.reason, /exFAT labels are at most 11 characters/)
+})
+
+test("a label the target filesystem forbids is refused before the drive is touched", () => {
+  const result = api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE,
+    plan({ fstype: "vfat", label: "MY:DISK" }))
+  assert.strictEqual(result.ok, false)
+  assert.match(result.reason, /cannot contain :/)
+})
+
+test("an empty label is a real answer here too — the drive ships without one", () => {
+  assert.strictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ label: "" })).ok, true)
+})
+
+test("a plan that clears every guard is approved", () => {
+  assert.deepStrictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({})),
+    { ok: true, reason: "" })
+})
+
+test("no plan at all is refused rather than defaulted", () => {
+  assert.strictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, null).ok, false)
+})
+
+test("the confirmation is the kernel name of the volume, not its label", () => {
+  assert.strictEqual(api.formatToken(FORMAT_VOLUME), "sdb1")
+  assert.strictEqual(api.formatConfirmed(FORMAT_VOLUME, "sdb1"), true)
+  assert.strictEqual(api.formatConfirmed(FORMAT_VOLUME, "  sdb1  "), true)
+})
+
+test("a confirmation that does not match exactly confirms nothing", () => {
+  for (const typed of ["", "sdb", "SDB1", "sdb2", "STICK", "yes"]) {
+    assert.strictEqual(api.formatConfirmed(FORMAT_VOLUME, typed), false, JSON.stringify(typed))
+  }
+  assert.strictEqual(api.formatConfirmed(null, ""), false)
+  assert.strictEqual(api.formatConfirmed({ name: "" }, ""), false, "a volume with no name cannot be confirmed")
+})
+
+test("a stick with no partition table is confirmed by the disk's own name", () => {
+  const drive = api.parse(tree([disk({ fstype: "exfat", label: "RAW", children: [] })]))[0]
+  assert.strictEqual(api.formatToken(drive.volumes[0]), "sdb")
+})
+
+test("the warning names the volume, its size, and the node about to be erased", () => {
+  const warning = api.formatWarning(FORMAT_VOLUME)
+  assert.match(warning, /STICK/)
+  assert.match(warning, /14\.6 GB/)
+  assert.match(warning, /\/dev\/sdb1/)
+  assert.strictEqual(api.formatWarning(null), "")
+})
+
+test("the line afterwards says what the drive became", () => {
+  assert.strictEqual(api.describeFormat(FORMAT_VOLUME, "exfat"), "Formatted STICK as exFAT")
+  assert.strictEqual(api.describeFormat(null, ""), "Formatted the volume")
 })
 
 console.log("\na filesystem left unmounted")
