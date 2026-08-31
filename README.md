@@ -30,6 +30,15 @@ and the bar goes back to what it was.
   one thing here that rewrites a filesystem, so it appears only after a check
   has found something, never one stray click from the mount button. A suspect
   drive mounts read-only first, so files come off without a byte going back.
+- **Formats a volume, once you have said so twice.** Erasing is the only thing
+  here that destroys data on purpose, so the button is on unmounted volumes
+  only and the volume's own kernel name has to be typed out before anything
+  runs. Pick exFAT, FAT32, NTFS, ext4 or Btrfs, name it on the way, and zero
+  the drive first when you want the old contents actually gone.
+- **A single drive can set its own terms.** One drive can mount read-only while
+  the rest mount normally, and one drive can open — or refuse to open — after
+  mounting whatever the global setting says. Both stick to the hardware, the
+  same way a nickname does.
 - **Unmounts before the machine sleeps**, optionally, so a drive pulled from a
   sleeping laptop is not left half-written, and says which one refused when
   one does.
@@ -88,9 +97,10 @@ camera roll can read as empty, because the originals are not on the device.
 | Phone row | click = browse (mounting on demand) |
 | Mount / open / unmount icons | mount · open · unmount that volume |
 | Rename / check icons | rename the volume · check it for errors |
+| Eraser icon | format an unmounted volume: erase it and create a filesystem |
 | Read-only / repair icons | after a failed check: mount read-only · repair |
 | Lock icon | locked: type the passphrase to unlock · open: lock it again |
-| Eject / nickname icons | eject the drive (or cancel a held eject) · nickname it |
+| Drive row icons | open after mounting · mount read-only · nickname · eject |
 | Eject icon in the header | eject every attached drive |
 
 Keyboard, while the panel is open:
@@ -103,6 +113,7 @@ Keyboard, while the panel is open:
 | `o` | open | `y` | copy its path |
 | `n` | nickname the drive | `r` `Esc` | rescan · close |
 | `l` | rename the volume | `c` | check it for errors |
+| `f` | format the volume | | |
 
 ## Settings
 
@@ -129,7 +140,9 @@ drive:
   "drives": {
     "serial:0901f8ef1ed9c144": {
       "nickname": "Work backup",
-      "onConnect": "rsync -a ~/Documents/ \"$2\"/documents/"
+      "onConnect": "rsync -a ~/Documents/ \"$2\"/documents/",
+      "autoOpen": false,
+      "readOnly": true
     }
   }
 }
@@ -137,6 +150,14 @@ drive:
 
 `onConnect` runs through `bash -c` when that drive appears, with `$1` as its
 device path and `$2` as its first mount point. Nothing writes it for you.
+
+`autoOpen` overrides `openOnMount` for this drive alone: `true` always opens,
+`false` never does, and leaving it out follows the global setting. `readOnly`
+mounts every volume on the drive read-only, which is what an archive disk you
+never want written to wants. The panel writes both from the drive row, and
+reads them strictly on the way back in: a `readOnly` that is neither `true` nor
+`false` is taken as `true`, because a typo in this file must not be the reason
+an archive drive came up writable.
 
 ## Scripting
 
@@ -151,7 +172,14 @@ omarchy-shell removable-drives label /dev/sdb1 "Photos"      # the label on the 
 omarchy-shell removable-drives check /dev/sdb1               # verdict lands in status
 omarchy-shell removable-drives mountReadOnly /dev/sdb1       # rescue without writing
 omarchy-shell removable-drives lock /dev/mapper/luks-…       # close an open container
+omarchy-shell removable-drives format /dev/sdb1 exfat Photos # erases the volume
 ```
+
+`format` destroys what is on the volume. It takes the same refusals the panel
+does — a mounted volume, a drive still being written to, or a filesystem udisks
+will not create are all turned away with the reason — but naming the node, the
+type and the label in one line is the whole confirmation, so there is no second
+question the way there is in the panel.
 
 `status` reports `busy: true` while the kernel still has I/O in flight, so a
 backup script can wait for the drive to settle; both eject calls wait by
@@ -174,13 +202,21 @@ input: whoever formatted a stick chooses its label. Every `Text` is pinned to
 are stripped of angle brackets first. Paths stay byte-exact, since commands are
 built from them.
 
-Renaming a filesystem and running its fsck are things udisks exposes on D-Bus
-that `udisksctl` has no verb for, so they go over the bus through `busctl`. It
-is still `allow_active: yes`, the same no-password path mounting takes. The
-object path is asked for rather than built, since udisks escapes the kernel
-name into it and an unlocked LUKS volume lands at `dm_2d3`. Both unmount the
-filesystem first and mount it back afterwards, whether or not the middle step
-worked.
+Renaming a filesystem, running its fsck, and creating a new one are things
+udisks exposes on D-Bus that `udisksctl` has no verb for, so they go over the
+bus through `busctl`. It is still `allow_active: yes`, the same no-password
+path mounting takes. The object path is asked for rather than built, since
+udisks escapes the kernel name into it and an unlocked LUKS volume lands at
+`dm_2d3`. The rename and the fsck unmount the filesystem first and mount it
+back afterwards, whether or not the middle step worked; the format does
+neither, because a mounted volume is refused outright rather than taken offline
+on the way to being erased.
+
+A format is checked as one plan — which volume, which type, which label,
+whether to zero the drive first — rather than as four arguments each looked at
+somewhere along the way, and the plan names the `/dev` node it was made for, so
+swapping the stick between planning it and confirming it retracts the format
+instead of pointing it at the replacement.
 
 A LUKS passphrase reaches udisks on stdin, never as an argument, because
 `/proc/<pid>/cmdline` is readable by every other process you run. udisksctl
@@ -193,7 +229,7 @@ candidate of a mounted removable volume. The tests assert it refuses `/`,
 `$HOME`, the mount root, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 152 tests, no compositor required
+node test/model.test.js       # 195 tests, no compositor required
 omarchy plugin validate .     # the same check the shell applies
 ```
 
