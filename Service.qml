@@ -70,8 +70,9 @@ Item {
   // What udisks says it can fsck, asked about the filesystem types actually
   // attached. The signature is the sorted list it was last asked about, so a
   // drive going in or out only costs a probe when it brings a new type.
-  property var fsCapabilities: ({ check: {}, repair: {} })
+  property var fsCapabilities: ({ check: {}, repair: {}, format: [] })
   property string _capsSignature: ""
+  property bool _capsProbed: false
 
   // The filesystem the last check was about, and what it said: true healthy,
   // false damaged, null unreadable. A repair is only ever offered for this
@@ -212,7 +213,7 @@ Item {
   // udisks last said it could fsck — so installing a missing tool and pressing
   // rescan is enough to make the check button appear, without a shell restart.
   function rescan() {
-    _capsSignature = ""
+    forgetCapabilities()
     refresh()
     refreshPortables()
   }
@@ -384,11 +385,20 @@ Item {
     actionProcess.running = true
   }
 
+  // The drive gets the last word on both halves of this. A drive saved as
+  // read-only mounts read-only however it was reached, and its own autoOpen
+  // decides whether a file manager follows — `openAfter` is the global default
+  // the caller came with, not the answer.
   function mount(volume, openAfter) {
     if (!volume || !Model.isMountable(volume) || busy) return
-    _openAfterPath = openAfter ? volume.fsPath : ""
-    runAction(["udisksctl", "mount", "--no-user-interaction", "-b", volume.fsPath],
-              volume.fsPath, "mount", "Mounted " + volume.title)
+    var device = deviceOfVolume(volume)
+    var readOnly = Model.shouldMountReadOnly(store, device)
+    _openAfterPath = Model.shouldOpenOnMount(store, device, openAfter === true) ? volume.fsPath : ""
+    var command = ["udisksctl", "mount", "--no-user-interaction"]
+    if (readOnly) command.push("-o", "ro")
+    command.push("-b", volume.fsPath)
+    runAction(command, volume.fsPath, "mount",
+              "Mounted " + volume.title + (readOnly ? " read-only" : ""))
   }
 
   function unmount(volume, force) {
@@ -458,10 +468,18 @@ Item {
   // runs, and a passphrase in argv is a passphrase in `ps`.
   //
   // udisks refuses the backing partition for mount and unmount alike, so the
-  // mount that follows targets the mapper udisksctl names on its way out.
+  // mount that follows targets the mapper udisksctl names on its way out —
+  // and honours the drive's own read-only setting, because the container is
+  // the third way a filesystem on it can come up.
   readonly property string unlockScript: [
     'set -u',
     'dev=$1',
+    'ro=$2',
+    'mountfs() {',
+    '  if [ "$ro" = 1 ]; then udisksctl mount --no-user-interaction -o ro -b "$1" >/dev/null',
+    '  else udisksctl mount --no-user-interaction -b "$1" >/dev/null',
+    '  fi',
+    '}',
     'keyfile="${XDG_RUNTIME_DIR:-/dev/shm}/removable-drives.$$.key"',
     "trap 'rm -f \"$keyfile\"' EXIT INT TERM",
     'umask 077',
@@ -473,7 +491,7 @@ Item {
     'mapper=${out##* as }',
     'mapper=${mapper%.}',
     'case "$mapper" in',
-    '  /dev/*) udisksctl mount --no-user-interaction -b "$mapper" >/dev/null ;;',
+    '  /dev/*) mountfs "$mapper" ;;',
     '  *) echo "udisks did not say which device it unlocked" >&2; exit 1 ;;',
     'esac'
   ].join("\n")
@@ -482,7 +500,8 @@ Item {
     if (!Model.canUnlock(volume)) return "This volume is not locked"
     if (busy) return refuse("Another action is still running")
     if (String(passphrase || "") === "") return refuse("Enter the passphrase first")
-    runAction(["bash", "-c", unlockScript, "removable-drives", volume.path],
+    var readOnly = Model.shouldMountReadOnly(store, deviceOfVolume(volume))
+    runAction(["bash", "-c", unlockScript, "removable-drives", volume.path, readOnly ? "1" : "0"],
               volume.fsPath, "unlock", "Unlocked " + volume.title,
               String(passphrase))
     return "ok"
@@ -720,6 +739,17 @@ Item {
     saveDriveSetting(device, "nickname", String(nickname || "").replace(/^\s+|\s+$/g, ""))
   }
 
+  // Both save null rather than false for the off position, so turning a
+  // setting back off leaves the file the way it was before anyone touched it
+  // instead of littering it with defaults written out longhand.
+  function cycleAutoOpen(device) {
+    saveDriveSetting(device, "autoOpen", Model.nextAutoOpen(driveSetting(device, "autoOpen", null)))
+  }
+
+  function setDriveReadOnly(device, readOnly) {
+    saveDriveSetting(device, "readOnly", readOnly ? true : null)
+  }
+
   function driveSetting(device, name, fallback) {
     var saved = Model.driveSettings(store, device)
     var value = saved[name]
@@ -869,23 +899,34 @@ Item {
     'exit $rc'
   ].join("\n")
 
-  // One round trip per filesystem type, and only for the types attached.
+  // One round trip per filesystem type, and only for the types attached, plus
+  // one for the list of filesystems udisks will create. That last one is asked
+  // even when nothing attached has a filesystem at all — a stick with no
+  // partition table is exactly the one somebody wants to format.
   readonly property string capsScript:
-    'for fs in "$@"; do for op in CanCheck CanRepair; do' +
+    'out=$(busctl --timeout=10 get-property org.freedesktop.UDisks2' +
+    ' /org/freedesktop/UDisks2/Manager org.freedesktop.UDisks2.Manager' +
+    ' SupportedFilesystems 2>/dev/null) || out="";' +
+    ' echo "Supported $out";' +
+    ' for fs in "$@"; do for op in CanCheck CanRepair; do' +
     ' out=$(busctl --timeout=10 call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager' +
     ' org.freedesktop.UDisks2.Manager "$op" s "$fs" 2>/dev/null) || out="";' +
     ' echo "$op $fs $out"; done; done'
 
+  // What rescan and a fresh install of a missing tool both mean: ask udisks
+  // again rather than trusting the answer from before.
+  function forgetCapabilities() {
+    _capsProbed = false
+    _capsSignature = ""
+  }
+
   function probeCapabilities() {
-    if (capsProcess.running) return
+    if (capsProcess.running || devices.length === 0) return
     var types = Model.fsTypesPresent(devices)
     var signature = types.join(",")
-    if (signature === _capsSignature) return
+    if (_capsProbed && signature === _capsSignature) return
+    _capsProbed = true
     _capsSignature = signature
-    if (types.length === 0) {
-      fsCapabilities = ({ check: {}, repair: {} })
-      return
-    }
     var command = ["bash", "-c", capsScript, "removable-drives"]
     for (var i = 0; i < types.length; i++) command.push(types[i])
     capsProcess.command = command
@@ -993,12 +1034,84 @@ Item {
     return "ok"
   }
 
+  // ------------------------------------------------------------- formatting
+
+  // Format lives on org.freedesktop.UDisks2.Block rather than on Filesystem,
+  // and takes (s type, a{sv} options), so it resolves the object the same way
+  // the rename and fsck script does — asked for, never built, because udisks
+  // escapes the kernel name into it.
+  //
+  // There is no unmount and no remount around this one. A mounted volume is
+  // refused outright rather than taken offline on the way to being erased, so
+  // by the time the script runs the drive is already the way the person left
+  // it.
+  //
+  // The options are assembled as positional arguments and counted, because the
+  // label is the one string here somebody typed and it must never become part
+  // of the script text. take-ownership is what makes a fresh ext4 or btrfs
+  // writable by the person who asked for it rather than by root alone; udisks
+  // ignores it on the filesystems that have no ownership to take.
+  readonly property string formatScript: [
+    'set -u',
+    'dev=$1',
+    'fstype=$2',
+    'label=$3',
+    'erase=$4',
+    'raw=$(busctl call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager' +
+      ' org.freedesktop.UDisks2.Manager ResolveDevice "a{sv}a{sv}" 1 path s "$dev" 0) || exit 1',
+    'obj=/${raw#*/}',
+    'obj=${obj%?}',
+    'case "$obj" in',
+    '  /org/freedesktop/UDisks2/block_devices/*) ;;',
+    '  *) echo "udisks does not recognise $dev" >&2; exit 1 ;;',
+    'esac',
+    'count=1',
+    'set -- take-ownership b true',
+    'if [ -n "$label" ]; then count=$((count + 1)); set -- "$@" label s "$label"; fi',
+    'if [ "$erase" = 1 ]; then count=$((count + 1)); set -- "$@" erase s zero; fi',
+    // Zeroing a drive has no useful upper bound and neither does laying down a
+    // big NTFS volume, so the bus timeout is a day rather than busctl's default
+    // twenty-five seconds, which would abandon the call mid-write.
+    'busctl --timeout=86400 call org.freedesktop.UDisks2 "$obj"' +
+      ' org.freedesktop.UDisks2.Block Format "sa{sv}" "$fstype" "$count" "$@"'
+  ].join("\n")
+
+  // The only thing here that destroys data on purpose. Every refusal comes
+  // back as the sentence the panel would have shown, so a script calling this
+  // over IPC learns why nothing happened — and the plan is validated whole,
+  // against the volume it names, before a byte of it reaches the bus.
+  function formatVolume(volume, fstype, label, quick) {
+    if (!volume) return "unknown volume"
+    if (busy) return refuse("Another action is still running")
+
+    var plan = {
+      fsPath: volume.fsPath,
+      fstype: Model.clean(fstype),
+      label: Model.normaliseLabel(label),
+      quick: quick !== false
+    }
+    var checked = Model.validateFormat(fsCapabilities, volume, deviceOfVolume(volume), plan)
+    if (!checked.ok) return refuse(checked.reason)
+
+    var blocked = fsActionBlocked(volume)
+    if (blocked !== "") return refuse(blocked)
+
+    // Nothing is opened afterwards, and nothing is mounted back. Somebody who
+    // has just erased a disk wants to see the empty volume in the panel, not a
+    // file manager opening over it.
+    _openAfterPath = ""
+    runAction(["bash", "-c", formatScript, "removable-drives",
+               plan.fsPath, plan.fstype, plan.label, plan.quick ? "0" : "1"],
+              plan.fsPath, "format", Model.describeFormat(volume, plan.fstype))
+    return "ok"
+  }
+
   // Same bargain as the gvfs hint: a plugin may not install anything, so it
   // names the package udisks went looking for and opens Omarchy's installer.
   function installCheckTools(volume) {
     var hint = Model.checkHint(fsCapabilities, volume)
     if (!hint || hint.packages === "") return
-    _capsSignature = ""
+    forgetCapabilities()
     Quickshell.execDetached(["omarchy-install-app", hint.label, hint.packages])
   }
 
@@ -1208,6 +1321,9 @@ Item {
                       root._successMessage.replace(/^Safe to remove /, ""),
                       Model.GLYPH_EJECT)
         }
+        // Worth a notification of its own: a full erase runs long enough that
+        // the panel is usually shut by the time it finishes.
+        if (action === "format") root.notify("Formatted", root._successMessage, Model.GLYPH_ERASER)
         if (action === "check" || action === "repair") root.applyVerdict(action, path)
         if (exitCode === Model.EXIT_REMOUNT_FAILED) {
           root.lastError = Model.remountWarning(root.actionStatus)
