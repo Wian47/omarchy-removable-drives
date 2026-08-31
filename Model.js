@@ -1456,9 +1456,12 @@ var SMART_WARNINGS = {
   "pmr_readonly": "its persistent memory region has gone read-only"
 }
 
+// The unmapped fallback and the self-test status below go into a tooltip whose
+// Text belongs to qs.Ui, so they are stripped the way a drive label is. udisks
+// chooses these words rather than the device, but the rule is cheap to keep.
 function smartWarningText(name) {
   var key = clean(name).toLowerCase()
-  return SMART_WARNINGS[key] !== undefined ? SMART_WARNINGS[key] : key
+  return SMART_WARNINGS[key] !== undefined ? SMART_WARNINGS[key] : plain(key)
 }
 
 // A self-test that ended in an error is evidence, and calling such a drive
@@ -1573,7 +1576,7 @@ function smartConcern(smart) {
     for (var i = 0; i < flags.length; i++) said.push(smartWarningText(flags[i]))
     return "The drive says " + joinNames(said)
   }
-  return "Its last self-test ended in " + clean(smart.selftest)
+  return "Its last self-test ended in " + plain(smart.selftest)
 }
 
 // Nothing at all for a drive that does not report health, because that is most

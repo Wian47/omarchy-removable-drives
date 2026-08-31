@@ -1609,6 +1609,13 @@ test("a critical-warning flag nobody has a sentence for is repeated verbatim", (
   assert.match(api.smartHint(smart), /something_new/)
 })
 
+test("the hint is stripped like anything else headed for a tooltip we do not own", () => {
+  // udisks picks these words rather than the device, but the hint reaches a
+  // qs.Ui tooltip whose Text cannot be pinned from here.
+  const hint = api.smartHint(api.parseSmart('SmartCriticalWarning as 1 "<img src=x>"'))
+  assert.ok(!hint.includes("<") && !hint.includes(">"), hint)
+})
+
 test("several critical warnings are read as a list", () => {
   const smart = api.parseSmart('SmartCriticalWarning as 2 "spare" "degraded"')
   assert.deepStrictEqual(smart.warnings, ["spare", "degraded"])

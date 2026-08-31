@@ -837,8 +837,8 @@ Item {
   }
 
   // Polling stops once every hook has reported itself finished, so a drive
-  // whose hook ran an hour ago costs nothing per second. A hook starting
-  // forgets that drive's state, which is what starts the poll again.
+  // whose hook ran an hour ago costs nothing per second. A hook starting marks
+  // that drive active again, which is what starts the poll back up.
   function hooksWorthPolling() {
     var names = hookedDrives()
     for (var i = 0; i < names.length; i++) {
