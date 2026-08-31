@@ -1333,8 +1333,15 @@ test("a volume that is not on the drive it was handed with is refused", () => {
 })
 
 test("a device-mapper node is not a removable drive this panel formats", () => {
-  const device = { name: "dm-0", path: "/dev/dm-0", volumes: [FORMAT_VOLUME] }
+  const device = { name: "dm-0", path: "/dev/dm-0", removable: true, volumes: [FORMAT_VOLUME] }
   assert.match(api.canFormat(FORMAT_CAPS, FORMAT_VOLUME, device), /not on a removable drive/)
+})
+
+test("a drive that never came out of a scan is not formattable at all", () => {
+  const device = { name: "sdb", path: "/dev/sdb", volumes: [FORMAT_VOLUME] }
+  assert.match(api.canFormat(FORMAT_CAPS, FORMAT_VOLUME, device), /not on a removable drive/,
+    "removability is only knowable from the lsblk node, so a device without the answer is refused")
+  assert.strictEqual(FORMAT_DRIVE.removable, true, "one that did come out of a scan carries it")
 })
 
 test("a mounted volume is refused rather than unmounted on the way", () => {

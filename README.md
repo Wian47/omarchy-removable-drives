@@ -229,7 +229,7 @@ candidate of a mounted removable volume. The tests assert it refuses `/`,
 `$HOME`, the mount root, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 195 tests, no compositor required
+node test/model.test.js       # 196 tests, no compositor required
 omarchy plugin validate .     # the same check the shell applies
 ```
 

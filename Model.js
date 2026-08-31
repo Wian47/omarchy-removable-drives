@@ -246,6 +246,11 @@ function buildDevice(node) {
     path: exact(node.path),
     name: exact(node.name),
     serial: exact(node.serial),
+    // Carried rather than recomputed later: only the lsblk node knows this,
+    // and by the time a format is being considered the node is long gone. A
+    // device object without it never came from a scan, and nothing
+    // destructive is offered on one.
+    removable: isCandidateDisk(node),
     title: deviceTitle(node),
     nickname: "",
     key: "",
@@ -1432,7 +1437,7 @@ function canFormat(caps, volume, device) {
   if (holdsSystemMount(volume) || holdsSystemMount(device)) {
     return "That drive is holding a system mount"
   }
-  if (!device || isVirtual(device.name) || !tracksVolume(device, volume)) {
+  if (!device || device.removable !== true || isVirtual(device.name) || !tracksVolume(device, volume)) {
     return "That volume is not on a removable drive this panel tracks"
   }
   if (volume.mounted) return "Unmount " + volume.title + " first"
