@@ -86,12 +86,12 @@ camera roll can read as empty, because the originals are not on the device.
 | Bar icon | left = open · right = rescan · middle = open first mounted volume |
 | Volume row | click = mount and open, or open if mounted · middle-click = copy its path |
 | Phone row | click = browse (mounting on demand) |
-| 󰄠 󰝰 󰄝 | mount · open · unmount that volume |
-| 󰓹 󰓙 | rename the volume · check it for errors |
-| 󰉐 󰖷 | after a failed check: mount read-only · repair |
-| 󰌾 | locked: type the passphrase to unlock · open: lock it again |
-| ⏏ ✏ | eject the drive (or cancel a held eject) · nickname it |
-| ⏏ in the header | eject every attached drive |
+| Mount / open / unmount icons | mount · open · unmount that volume |
+| Rename / check icons | rename the volume · check it for errors |
+| Read-only / repair icons | after a failed check: mount read-only · repair |
+| Lock icon | locked: type the passphrase to unlock · open: lock it again |
+| Eject / nickname icons | eject the drive (or cancel a held eject) · nickname it |
+| Eject icon in the header | eject every attached drive |
 
 Keyboard, while the panel is open:
 
