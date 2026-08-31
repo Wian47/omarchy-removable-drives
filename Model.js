@@ -144,9 +144,13 @@ function holdsSystemMount(node) {
   for (var m = 0; m < mounts.length; m++) {
     if (mounts[m] && SYSTEM_MOUNTS.indexOf(exact(mounts[m])) !== -1) return true
   }
-  var kids = (node.children || []).concat(node.volumes || [])
+  var kids = node.children || []
   for (var i = 0; i < kids.length; i++) {
     if (holdsSystemMount(kids[i])) return true
+  }
+  var volumes = node.volumes || []
+  for (var v = 0; v < volumes.length; v++) {
+    if (holdsSystemMount(volumes[v])) return true
   }
   return false
 }

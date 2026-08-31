@@ -821,7 +821,7 @@ Panel {
 
     // Tri-state: null follows the global openOnMount, true and false override
     // it for this drive alone.
-    readonly property var autoOpen: Model.autoOpenPolicy(drives.driveSetting(device, "autoOpen", null))
+    readonly property var autoOpen: Model.autoOpenPolicy(Model.driveSettings(drives.store, device).autoOpen)
     readonly property bool mountsReadOnly: Model.shouldMountReadOnly(drives.store, device)
     readonly property bool ejectPending: device
       && (drives.pendingEjectPath === device.path || drives.pendingEjectPath === "*")

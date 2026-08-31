@@ -68,8 +68,9 @@ Item {
   property string uid: ""
 
   // What udisks says it can fsck, asked about the filesystem types actually
-  // attached. The signature is the sorted list it was last asked about, so a
-  // drive going in or out only costs a probe when it brings a new type.
+  // attached, and what it says it can create, which is the same answer for
+  // every drive. The signature is the sorted list it was last asked about, so
+  // a drive going in or out only costs a probe when it brings a new type.
   property var fsCapabilities: ({ check: {}, repair: {}, format: [] })
   property string _capsSignature: ""
   property bool _capsProbed: false
@@ -1323,7 +1324,9 @@ Item {
         }
         // Worth a notification of its own: a full erase runs long enough that
         // the panel is usually shut by the time it finishes.
-        if (action === "format") root.notify("Formatted", root._successMessage, Model.GLYPH_ERASER)
+        if (action === "format") {
+          root.notify("Formatted", root._successMessage.replace(/^Formatted /, ""), Model.GLYPH_ERASER)
+        }
         if (action === "check" || action === "repair") root.applyVerdict(action, path)
         if (exitCode === Model.EXIT_REMOUNT_FAILED) {
           root.lastError = Model.remountWarning(root.actionStatus)
