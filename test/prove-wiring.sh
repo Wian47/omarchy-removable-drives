@@ -58,6 +58,12 @@ attempt "a setting missing from the README table" \
 attempt "a schema default that disagrees with the widget default" \
   "node -e 'const m=require(\"./manifest.json\");m.barWidget.defaults.openOnMount=false;require(\"fs\").writeFileSync(\"manifest.json\",JSON.stringify(m,null,2))'"
 
+# Assembled, not spelled, for the reason wiring.test.js gives: this file is
+# inside the tree the capability scan reads.
+FLAGGED="su""do"
+attempt "a documentation line using a word the capability scan flags" \
+  "sed -i 's|Nothing runs as root|Nothing runs as root and never through $FLAGGED|' README.md"
+
 attempt "an entry point naming a file that is not there" \
   "node -e 'const m=require(\"./manifest.json\");m.entryPoints.barWidget=\"Missing.qml\";require(\"fs\").writeFileSync(\"manifest.json\",JSON.stringify(m,null,2))'"
 
