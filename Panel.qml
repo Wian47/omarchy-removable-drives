@@ -391,14 +391,28 @@ Panel {
 
     function phones(): string { return JSON.stringify(drives.portables) }
 
+    // Health as udisks reports it, for one drive ("/dev/sdb"). Most drives
+    // report none: `supported` comes back false with every other field null,
+    // which is the ordinary answer for a USB stick rather than a failed read.
+    function smart(path: string): string {
+      for (var i = 0; i < drives.devices.length; i++) {
+        if (drives.devices[i].path === path) {
+          return JSON.stringify(drives.smartFor(drives.devices[i]) || Model.parseSmart(""))
+        }
+      }
+      return "unknown device: " + path
+    }
+
     function ejectAll(): string {
       if (drives.devices.length === 0) return "no drives attached"
       drives.ejectAll()
       return "ok"
     }
 
-    // "busy" while the kernel still has I/O in flight — a script can poll
-    // this before telling someone it is safe to pull the drive.
+    // "busy" while the kernel still has I/O in flight or a drive is running
+    // its connect hook — a script can poll this before telling someone it is
+    // safe to pull the drive. `hooks` says which drive is doing what, since a
+    // backup script already waits here and that is the same question.
     function status(): string {
       return JSON.stringify({
         devices: drives.deviceCount,
@@ -408,7 +422,9 @@ Panel {
         pendingEject: drives.pendingEjectPath,
         working: drives.busy,
         checked: drives.checkedFsPath,
-        healthy: drives.checkVerdict
+        healthy: drives.checkVerdict,
+        hooks: drives.hookReport(),
+        health: drives.healthReport()
       })
     }
   }
@@ -826,6 +842,15 @@ Panel {
     readonly property bool ejectPending: device
       && (drives.pendingEjectPath === device.path || drives.pendingEjectPath === "*")
 
+    readonly property var hook: device ? drives.hookStateFor(device) : null
+    readonly property string hookText: device ? drives.hookLabelFor(device) : ""
+
+    // "unsupported" is the common answer — a USB stick carries neither SMART
+    // interface — and it draws nothing at all rather than an empty health row
+    // on a drive that will never have one to fill.
+    readonly property string healthVerdict: device ? drives.smartVerdictFor(device) : "unsupported"
+    readonly property string healthText: device ? drives.smartHintFor(device) : ""
+
     hasCursor: selected
     foreground: root.foreground
     implicitHeight: deviceContent.implicitHeight + Style.spacing.rowPaddingX
@@ -919,6 +944,76 @@ Panel {
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
         }
+
+        // Said in the row rather than left in a tooltip, because a drive that
+        // has started to go is the one thing here worth reading without
+        // hovering anything. A healthy drive keeps its numbers in the tooltip.
+        Text {
+          textFormat: Text.PlainText
+          visible: deviceRow.healthVerdict === "warning" || deviceRow.healthVerdict === "failing"
+          Layout.fillWidth: true
+          Layout.topMargin: Style.space(2)
+          text: deviceRow.healthText
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+
+        // A hook is the one kind of work on a drive the kernel counters cannot
+        // see: an rsync goes quiet between file batches and the busy icon goes
+        // out with it. So the row says what the hook says.
+        Text {
+          textFormat: Text.PlainText
+          visible: deviceRow.hookText !== ""
+          Layout.fillWidth: true
+          text: deviceRow.hookText
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+
+        // The free-space bar's shape reused rather than a second bar style,
+        // and drawn only once the hook reports a number — a bar with nothing
+        // behind it reads as "nought percent" rather than "not saying".
+        Rectangle {
+          visible: deviceRow.hook !== null && deviceRow.hook.active && deviceRow.hook.percent !== null
+          Layout.fillWidth: true
+          Layout.topMargin: Style.space(2)
+          implicitHeight: Math.max(2, Style.space(3))
+          radius: height / 2
+          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+
+          Rectangle {
+            readonly property real fraction: deviceRow.hook && deviceRow.hook.percent !== null
+              ? deviceRow.hook.percent / 100 : 0
+            width: Math.max(parent.width > 0 && fraction > 0 ? 2 : 0, parent.width * fraction)
+            height: parent.height
+            radius: parent.radius
+            color: root.foreground
+            opacity: 0.65
+
+            Behavior on width {
+              NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+            }
+          }
+        }
+      }
+
+      // Health belongs to the drive rather than to any one volume on it, so it
+      // sits in the drive's own row of actions beside the check and repair the
+      // volumes carry. Absent on most drives, and silently so.
+      PanelActionButton {
+        visible: deviceRow.healthVerdict !== "unsupported"
+        iconText: deviceRow.healthVerdict === "healthy" ? Model.GLYPH_HEALTHY : Model.GLYPH_ALERT
+        tooltipText: deviceRow.healthText + " — click to read it again"
+        foreground: deviceRow.healthVerdict === "healthy" ? root.dim : root.urgent
+        fontFamily: root.fontFamily
+        enabled: !drives.refreshing
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfDevice(deviceRow.deviceIndex)) }
+        onClicked: drives.rescan()
       }
 
       // Two settings that belong to the drive rather than to the shell, beside

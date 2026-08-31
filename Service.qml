@@ -26,6 +26,17 @@ Item {
   // in flight, and whether the drive is settled enough to pull.
   property var activity: ({})
 
+  // What each drive's onConnect hook is doing, keyed by the name of the file
+  // it reports into. A hook is the one kind of work on a drive the kernel
+  // counters cannot see: an rsync goes quiet between file batches.
+  property var hooks: ({})
+
+  // Health as udisks reports it, keyed by device path. Most drives report
+  // none — a USB stick carries neither SMART interface — and that is a normal,
+  // quiet answer rather than a fault.
+  property var smart: ({})
+  property string _smartSignature: ""
+
   // The panel sets this while it is open, so free space stays current while
   // someone is looking at it and costs nothing while they are not.
   property bool watchClosely: false
@@ -108,12 +119,11 @@ Item {
     return total
   }
 
-  // True while any attached drive still has I/O in flight — the state in which
-  // pulling the drive is what loses data.
+  // True while any attached drive still has I/O in flight or is running its
+  // connect hook — the state in which pulling the drive is what loses data.
   readonly property bool anyBusy: {
     for (var i = 0; i < devices.length; i++) {
-      var entry = activity[devices[i].name]
-      if (entry && entry.busy) return true
+      if (isDeviceBusy(devices[i])) return true
     }
     return false
   }
@@ -184,9 +194,13 @@ Item {
     return activity[device.name] || null
   }
 
+  // A running hook counts as busy for the same reason kernel I/O does: pulling
+  // the drive while it works is what loses the copy. It goes through here
+  // rather than beside it, so the eject hold, the pending-eject wait and the
+  // bar icon all pick it up without a second mechanism to keep in step.
   function isDeviceBusy(device) {
     var entry = activityFor(device)
-    return !!(entry && entry.busy)
+    return !!(entry && entry.busy) || hookActive(device)
   }
 
   function activityLabelFor(device) {
@@ -213,8 +227,11 @@ Item {
   // What the rescan button and `r` do. Unlike refresh(), it also forgets what
   // udisks last said it could fsck — so installing a missing tool and pressing
   // rescan is enough to make the check button appear, without a shell restart.
+  // Health is forgotten for the same reason: it is the only other answer here
+  // that is read once and then kept.
   function rescan() {
     forgetCapabilities()
+    _smartSignature = ""
     refresh()
     refreshPortables()
   }
@@ -244,6 +261,7 @@ Item {
 
     if (watchClosely) probeTrash()
     probeCapabilities()
+    probeSmart()
     updateSuspendTargets()
 
     // A mount requested with "open after mounting" only knows where the
@@ -757,13 +775,56 @@ Item {
     return value === undefined || value === null ? fallback : value
   }
 
+  // ------------------------------------------------------- connect hooks
+  //
   // A user-authored command run when a specific drive appears — a backup, a
   // sync, an import. It is never inferred and never suggested; it only runs
   // if someone put it in the state file for that drive themselves.
+  //
+  // Until it had somewhere to report, the panel drew a drive running an rsync
+  // as an idle one, and someone could pull it mid-copy. The busy icon is no
+  // substitute: kernel I/O goes quiet between an rsync's file batches.
+
+  // Where a hook writes its progress, and the only file this plugin ever asks
+  // one to touch. XDG_RUNTIME_DIR is tmpfs, so it never reaches persistent
+  // storage and never outlives the session.
+  readonly property string progressDir: {
+    var runtime = String(Quickshell.env("XDG_RUNTIME_DIR") || "")
+    return (runtime !== "" ? runtime : "/dev/shm") + "/omarchy-removable-drives/progress"
+  }
+
+  function progressName(device) {
+    return Model.hookProgressName(Model.driveKey(device))
+  }
+
+  // The wrapper is what lets the panel tell a hook still working from one that
+  // died: it records its own pid beside the progress file, and a trap clears
+  // that however the hook ends. A pid file rather than a Process held here,
+  // because a hook outlives a shell restart and the panel should find it again
+  // when it comes back.
+  //
+  // The user's command still reaches bash as a positional argument rather than
+  // as script text, and gains $3 — the file above — beside the $1 and $2 it
+  // already had. Every hook written before this one is unaffected.
+  readonly property string hookScript: [
+    'set -u',
+    'dir=$1',
+    'file=$dir/$2',
+    'mkdir -p "$dir" || exit 1',
+    ': > "$file" || exit 1',
+    "trap 'rm -f \"$file.pid\"' EXIT INT TERM HUP",
+    'printf %s "$$" > "$file.pid"',
+    'bash -c "$5" removable-drives "$3" "$4" "$file"'
+  ].join("\n")
+
   function runConnectHook(device) {
     var command = String(driveSetting(device, "onConnect", "")).replace(/^\s+|\s+$/g, "")
     if (command === "") return
-    Quickshell.execDetached(["bash", "-c", command, "removable-drives", device.path, mountpointOf(device)])
+    var name = progressName(device)
+    if (name === "") return
+    markHookStarted(name)
+    Quickshell.execDetached(["bash", "-c", hookScript, "removable-drives",
+                             progressDir, name, device.path, mountpointOf(device), command])
   }
 
   function mountpointOf(device) {
@@ -772,6 +833,119 @@ Item {
       if (device.volumes[i].mounted) return device.volumes[i].mountpoint
     }
     return ""
+  }
+
+  // One pass over every drive with a hook: whether the process this plugin
+  // started is still alive, then whatever it has written. Capped, because a
+  // runaway hook writing into its progress file should cost a truncated line
+  // rather than the whole panel.
+  readonly property string hookPollScript: [
+    'set -u',
+    'dir=$1',
+    'shift',
+    'for name; do',
+    '  file=$dir/$name',
+    '  run=0',
+    '  pid=$(cat "$file.pid" 2>/dev/null) || pid=""',
+    '  case "$pid" in',
+    '    ""|*[!0-9]*) ;;',
+    '    *) kill -0 "$pid" 2>/dev/null && run=1 ;;',
+    '  esac',
+    '  echo "==> $name $run <=="',
+    '  if [ -r "$file" ]; then head -c 1024 "$file"; echo; fi',
+    'done'
+  ].join("\n")
+
+  function hookedDrives() {
+    var out = []
+    for (var i = 0; i < devices.length; i++) {
+      var command = String(driveSetting(devices[i], "onConnect", "")).replace(/^\s+|\s+$/g, "")
+      if (command === "") continue
+      var name = progressName(devices[i])
+      if (name !== "") out.push(name)
+    }
+    return out
+  }
+
+  // Polling stops once every hook has reported itself finished, so a drive
+  // whose hook ran an hour ago costs nothing per second. A hook starting marks
+  // that drive active again, which is what starts the poll back up.
+  function hooksWorthPolling() {
+    var names = hookedDrives()
+    for (var i = 0; i < names.length; i++) {
+      var state = hooks[names[i]]
+      if (!state || state.active) return names
+    }
+    return []
+  }
+
+  function sampleHooks() {
+    if (hooksProcess.running) return
+    var names = hooksWorthPolling()
+    if (names.length === 0) return
+    var command = ["bash", "-c", hookPollScript, "removable-drives", progressDir]
+    for (var i = 0; i < names.length; i++) command.push(names[i])
+    hooksProcess.command = command
+    hooksProcess.running = true
+  }
+
+  // Rebuilt against the drives actually attached, the same way the busy tally
+  // is, so a drive that has gone takes its hook state with it.
+  function applyHooks(raw) {
+    var report = Model.parseHookReport(raw)
+    var live = hookedDrives()
+    var next = {}
+    for (var i = 0; i < live.length; i++) {
+      var name = live[i]
+      if (report[name] !== undefined) next[name] = report[name]
+      else if (hooks[name] !== undefined) next[name] = hooks[name]
+    }
+    hooks = next
+    advancePendingEject()
+  }
+
+  // Busy from the instant the hook is launched rather than from the first poll
+  // a second later, so an eject clicked in that gap is held rather than cutting
+  // power to a copy that had only just started. It is also what puts the drive
+  // back in the poll, since the poll stops once every hook has finished.
+  function markHookStarted(name) {
+    var next = {}
+    for (var key in hooks) next[key] = hooks[key]
+    next[name] = { active: true, percent: null, status: "", done: false }
+    hooks = next
+  }
+
+  function hookStateFor(device) {
+    if (!device) return null
+    var name = progressName(device)
+    return name === "" ? null : (hooks[name] || null)
+  }
+
+  function hookActive(device) {
+    var state = hookStateFor(device)
+    return !!(state && state.active)
+  }
+
+  function hookLabelFor(device) {
+    return Model.hookLabel(hookStateFor(device))
+  }
+
+  // What `status` reports, so a backup script polling for a drive to settle
+  // sees the same thing the panel does.
+  function hookReport() {
+    var out = []
+    for (var i = 0; i < devices.length; i++) {
+      var state = hookStateFor(devices[i])
+      if (!state) continue
+      out.push({
+        device: devices[i].path,
+        active: state.active,
+        percent: state.percent,
+        status: state.status,
+        done: state.done
+      })
+    }
+    return out
   }
 
   // -------------------------------------------------------------- trash
@@ -952,6 +1126,9 @@ Item {
   function fsActionBlocked(volume) {
     if (!volume) return "No volume selected"
     var device = deviceOfVolume(volume)
+    if (device && hookActive(device)) {
+      return device.title + " is still running its connect hook — try again once it finishes"
+    }
     if (device && Model.sustainedBusy(_busyTicks[device.name])) {
       return device.title + " is still being written to — try again once it settles"
     }
@@ -1150,6 +1327,120 @@ Item {
            repaired ? "" : "normal")
   }
 
+  // ------------------------------------------------------- drive health
+  //
+  // smartctl is the reflex and it is the wrong tool: it wants root for most
+  // devices, and smartmontools is not standard on Omarchy, so reaching for it
+  // would break both "nothing runs as root" and "no extra packages". udisks
+  // already does the privileged read and publishes the answer over the bus on
+  // the same allow_active path mounting takes.
+  //
+  // Most drives will answer with nothing. Only an external SSD or a hard drive
+  // behind a SAT-capable bridge reports health at all; a USB thumb drive
+  // carries neither interface, and that silence is the normal answer rather
+  // than something to explain.
+
+  // Both interfaces are asked of every drive and the absent one simply answers
+  // nothing, which costs less than asking udisks which of the two a drive has
+  // and then asking again.
+  //
+  // The object path is resolved rather than built, the same way fsScript does
+  // it — and health lives on the drive object rather than the block one, so it
+  // takes the second lookup to get there.
+  //
+  // Reading the properties does not refresh them. udisks hands back whatever
+  // its own last poll cached, which measured ten minutes stale here: the bus
+  // said 308 K while every hwmon sensor on the same drive said 36.85 °C, a gap
+  // of two degrees that is staleness rather than arithmetic. So SmartUpdate is
+  // called first. It is `allow_active: yes` in the udisks policy — the same
+  // no-password path everything else here takes — under
+  // org.freedesktop.udisks2.ata-smart-update and its nvme twin.
+  //
+  // Best-effort, and deliberately not `|| continue`: a drive that refuses an
+  // update is still read, because a stale number beats no number. `nowakeup`
+  // goes to ATA, which is the interface that takes it, so a parked external
+  // disk is not spun up merely to draw a temperature. An NVMe has no heads to
+  // park and takes no such option.
+  readonly property string smartScript: [
+    'set -u',
+    'for dev; do',
+    '  echo "==> $dev <=="',
+    '  raw=$(busctl --timeout=20 call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager' +
+      ' org.freedesktop.UDisks2.Manager ResolveDevice "a{sv}a{sv}" 1 path s "$dev" 0 2>/dev/null) || continue',
+    '  obj=/${raw#*/}',
+    '  obj=${obj%?}',
+    '  case "$obj" in /org/freedesktop/UDisks2/block_devices/*) ;; *) continue ;; esac',
+    '  raw=$(busctl --timeout=20 get-property org.freedesktop.UDisks2 "$obj"' +
+      ' org.freedesktop.UDisks2.Block Drive 2>/dev/null) || continue',
+    '  drive=/${raw#*/}',
+    '  drive=${drive%?}',
+    '  case "$drive" in /org/freedesktop/UDisks2/drives/*) ;; *) continue ;; esac',
+    '  busctl --timeout=30 call org.freedesktop.UDisks2 "$drive"' +
+      ' org.freedesktop.UDisks2.Drive.Ata SmartUpdate "a{sv}" 1 nowakeup b true' +
+      ' >/dev/null 2>&1 || true',
+    '  for p in SmartFailing SmartTemperature SmartPowerOnSeconds SmartNumBadSectors' +
+      ' SmartSelftestStatus SmartUpdated; do',
+    '    v=$(busctl --timeout=20 get-property org.freedesktop.UDisks2 "$drive"' +
+      ' org.freedesktop.UDisks2.Drive.Ata "$p" 2>/dev/null) || continue',
+    '    echo "$p $v"',
+    '  done',
+    '  busctl --timeout=30 call org.freedesktop.UDisks2 "$drive"' +
+      ' org.freedesktop.UDisks2.NVMe.Controller SmartUpdate "a{sv}" 0 >/dev/null 2>&1 || true',
+    '  for p in SmartCriticalWarning SmartTemperature SmartPowerOnHours' +
+      ' SmartSelftestStatus SmartUpdated; do',
+    '    v=$(busctl --timeout=20 get-property org.freedesktop.UDisks2 "$drive"' +
+      ' org.freedesktop.UDisks2.NVMe.Controller "$p" 2>/dev/null) || continue',
+    '    echo "$p $v"',
+    '  done',
+    'done'
+  ].join("\n")
+
+  // Read once when the set of attached drives changes, and on an explicit
+  // rescan. Never on the free-space timer: refreshing it is a round trip to
+  // the drive itself, and every answer but the temperature changes over hours
+  // rather than seconds. The temperature is therefore a snapshot from the last
+  // read, which is what the health icon re-reads on a click.
+  function probeSmart() {
+    if (smartProcess.running) return
+    var paths = []
+    for (var i = 0; i < devices.length; i++) paths.push(devices[i].path)
+    paths.sort()
+    var signature = paths.join(",")
+    if (signature === _smartSignature) return
+    _smartSignature = signature
+    if (paths.length === 0) {
+      smart = ({})
+      return
+    }
+    var command = ["bash", "-c", smartScript, "removable-drives"]
+    for (var p = 0; p < paths.length; p++) command.push(paths[p])
+    smartProcess.command = command
+    smartProcess.running = true
+  }
+
+  function smartFor(device) {
+    if (!device) return null
+    return smart[device.path] || null
+  }
+
+  function smartVerdictFor(device) {
+    return Model.smartVerdict(smartFor(device))
+  }
+
+  function smartHintFor(device) {
+    return Model.smartHint(smartFor(device))
+  }
+
+  // Folded into `status` the way a check's verdict is, keyed by device path so
+  // a script with two drives attached can tell which one it is reading.
+  function healthReport() {
+    var out = {}
+    for (var i = 0; i < devices.length; i++) {
+      out[devices[i].path] = Model.smartVerdict(smartFor(devices[i]))
+    }
+    return out
+  }
+
   // ------------------------------------------------ phones and cameras
 
   function refreshPortables() {
@@ -1281,6 +1572,22 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applyStats(text)
+    }
+  }
+
+  Process {
+    id: hooksProcess
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyHooks(text)
+    }
+  }
+
+  Process {
+    id: smartProcess
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.smart = Model.parseSmartReport(text)
     }
   }
 
@@ -1480,13 +1787,17 @@ Item {
   }
 
   // I/O counters are only sampled while something removable is attached, so
-  // the widget costs nothing on a machine with no drive plugged in.
+  // the widget costs nothing on a machine with no drive plugged in. A hook is
+  // read on the same tick, and only for a drive that has one still working.
   Timer {
     interval: 1000
     running: root.devices.length > 0
     repeat: true
     triggeredOnStart: true
-    onTriggered: root.sampleActivity()
+    onTriggered: {
+      root.sampleActivity()
+      root.sampleHooks()
+    }
   }
 
   // Free space drifts while a copy runs; only worth watching while the panel
