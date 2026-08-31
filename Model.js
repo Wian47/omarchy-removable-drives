@@ -41,6 +41,7 @@ var GLYPH_WRENCH = codepoint(0xF05B7)    // md-wrench
 var GLYPH_HEALTHY = codepoint(0xF05E0)   // md-check_circle
 var GLYPH_READONLY = codepoint(0xF0250)  // md-folder_lock
 var GLYPH_ERASER = codepoint(0xF01FE)    // md-eraser
+var GLYPH_FOLDER_OFF = codepoint(0xF19F8) // md-folder_off
 
 // ------------------------------------------------------------ formatting
 

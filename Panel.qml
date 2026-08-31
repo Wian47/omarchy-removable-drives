@@ -55,6 +55,14 @@ Panel {
   // is handed to the process, and is cleared the moment it is.
   property string unlockingPath: ""
 
+  // fsPath of the volume whose format is being set up, "" when none is. The
+  // chosen type and the erase choice live up here rather than in the row,
+  // because a refresh rebuilds the rows underneath a half-answered format and
+  // the answers should not go with them.
+  property string formattingPath: ""
+  property string formatType: ""
+  property bool formatQuick: true
+
   readonly property var devices: drives.devices
   readonly property var rows: Model.navRows(drives.devices, drives.portables)
   property int cursor: 0
@@ -165,6 +173,7 @@ Panel {
     if (!volume || !Model.canUnlock(volume)) return
     renamingKey = ""
     renamingLabelPath = ""
+    formattingPath = ""
     unlockingPath = volume.fsPath
   }
 
@@ -176,11 +185,34 @@ Panel {
   function beginLabelEdit(volume) {
     if (!volume || !Model.canRelabel(volume)) return
     renamingKey = ""
+    formattingPath = ""
     renamingLabelPath = volume.fsPath
   }
 
   function finishLabelEdit() {
     renamingLabelPath = ""
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  // Opening the editor is the first of the two things a format takes, and it
+  // is deliberately not the format: nothing is chosen yet, and nothing runs
+  // until the volume's own kernel name has been typed underneath. The type
+  // starts on whatever the volume already is, so someone reformatting a stick
+  // to clear it does not have to pick its type back out of the list.
+  function beginFormat(volume) {
+    if (!volume) return
+    if (Model.canFormat(drives.fsCapabilities, volume, drives.deviceOfVolume(volume)) !== null) return
+    renamingKey = ""
+    renamingLabelPath = ""
+    unlockingPath = ""
+    var types = Model.formatTypes(drives.fsCapabilities)
+    formatType = types.indexOf(volume.fstype) !== -1 ? volume.fstype : (types.length > 0 ? types[0] : "")
+    formatQuick = true
+    formattingPath = volume.fsPath
+  }
+
+  function finishFormat() {
+    formattingPath = ""
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -234,18 +266,11 @@ Panel {
       }
       if (!stillHere) renamingKey = ""
     }
-    // A relabel unmounts and remounts, so the volume this editor belongs to
-    // comes and goes underneath it; it is the fsPath that has to still exist,
-    // not the mount.
-    if (renamingLabelPath !== "") {
-      var volumeHere = false
-      for (i = 0; i < devices.length; i++) {
-        for (var v = 0; v < devices[i].volumes.length; v++) {
-          if (devices[i].volumes[v].fsPath === renamingLabelPath) volumeHere = true
-        }
-      }
-      if (!volumeHere) renamingLabelPath = ""
-    }
+    // A relabel unmounts and remounts, so the volume these editors belong to
+    // comes and goes underneath them; it is the fsPath that has to still
+    // exist, not the mount.
+    if (renamingLabelPath !== "" && !drives.volumeByPath(renamingLabelPath)) renamingLabelPath = ""
+    if (formattingPath !== "" && !drives.volumeByPath(formattingPath)) formattingPath = ""
     // An unlock replaces the locked volume with its mapper, so the row this
     // field belongs to is gone the moment it succeeds.
     if (unlockingPath !== "") {
@@ -264,6 +289,7 @@ Panel {
     renamingKey = ""
     renamingLabelPath = ""
     unlockingPath = ""
+    formattingPath = ""
     if (opened) {
       cursorActive = false
       cursor = 0
@@ -352,6 +378,17 @@ Panel {
       return drives.checkVolume(volume)
     }
 
+    // Erases the volume and puts a new filesystem on it. There is no second
+    // question here the way there is in the panel — naming the node, the type
+    // and the label in one line is the deliberate act — but every refusal the
+    // panel would have made still applies, including the one that says to
+    // unmount it first.
+    function format(path: string, fstype: string, name: string): string {
+      var volume = drives.volumeByPath(path)
+      if (!volume) return "unknown volume: " + path
+      return drives.formatVolume(volume, fstype, name, true)
+    }
+
     function phones(): string { return JSON.stringify(drives.portables) }
 
     function ejectAll(): string {
@@ -430,7 +467,7 @@ Panel {
       // While a nickname or a label is being typed, every keystroke belongs to
       // the text field rather than to the cursor.
       blocked: root.renamingKey !== "" || root.renamingLabelPath !== ""
-        || root.unlockingPath !== ""
+        || root.unlockingPath !== "" || root.formattingPath !== ""
 
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) {
@@ -453,6 +490,7 @@ Panel {
         else if (text === "n" || text === "N") root.beginRename(root.currentDevice())
         else if (text === "l" || text === "L") root.beginLabelEdit(root.currentVolume())
         else if (text === "c" || text === "C") drives.checkVolume(root.currentVolume())
+        else if (text === "f" || text === "F") root.beginFormat(root.currentVolume())
         else if (text === "m" || text === "M") {
           if (root.currentRow && root.currentRow.kind === "portable") drives.togglePortable(root.currentPortable())
           else drives.toggleMount(root.currentVolume(), root.openOnMount)
@@ -780,6 +818,11 @@ Panel {
       && root.currentRow.kind === "device" && root.currentRow.device === deviceIndex
     readonly property string activity: device ? drives.activityLabelFor(device) : ""
     readonly property bool renaming: device && device.key !== "" && root.renamingKey === device.key
+
+    // Tri-state: null follows the global openOnMount, true and false override
+    // it for this drive alone.
+    readonly property var autoOpen: Model.autoOpenPolicy(drives.driveSetting(device, "autoOpen", null))
+    readonly property bool mountsReadOnly: Model.shouldMountReadOnly(drives.store, device)
     readonly property bool ejectPending: device
       && (drives.pendingEjectPath === device.path || drives.pendingEjectPath === "*")
 
@@ -876,6 +919,36 @@ Panel {
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
         }
+      }
+
+      // Two settings that belong to the drive rather than to the shell, beside
+      // the nickname because that is where per-drive memory already lives.
+      // Both are dim while the drive is doing whatever every other drive does,
+      // so a row with nothing set apart reads as a row with nothing set.
+      PanelActionButton {
+        iconText: deviceRow.autoOpen === false ? Model.GLYPH_FOLDER_OFF : Model.GLYPH_FOLDER
+        tooltipText: deviceRow.autoOpen === true
+          ? "Always opens this drive after mounting — click to never open it"
+          : deviceRow.autoOpen === false
+            ? "Never opens this drive after mounting — click to follow the global setting"
+            : "Opens after mounting when the global setting says so — click to always open this drive"
+        foreground: deviceRow.autoOpen === null ? root.dim : root.foreground
+        fontFamily: root.fontFamily
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfDevice(deviceRow.deviceIndex)) }
+        onClicked: drives.cycleAutoOpen(deviceRow.device)
+      }
+
+      PanelActionButton {
+        iconText: Model.GLYPH_READONLY
+        tooltipText: deviceRow.mountsReadOnly
+          ? "Every volume on this drive mounts read-only — click to allow writes again"
+          : "Mount every volume on this drive read-only, so nothing can be written to it"
+        foreground: deviceRow.mountsReadOnly ? root.foreground : root.dim
+        fontFamily: root.fontFamily
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfDevice(deviceRow.deviceIndex)) }
+        onClicked: drives.setDriveReadOnly(deviceRow.device, !deviceRow.mountsReadOnly)
       }
 
       PanelActionButton {
@@ -1019,6 +1092,24 @@ Panel {
     readonly property bool canCheck: volume && Model.canCheck(drives.fsCapabilities, volume)
     readonly property var checkHint: volume ? Model.checkHint(drives.fsCapabilities, volume) : null
 
+    readonly property bool formatting: volume && root.formattingPath === volume.fsPath
+    readonly property bool formattable: volume
+      && Model.canFormat(drives.fsCapabilities, volume, drives.deviceOfVolume(volume)) === null
+
+    // The whole plan, re-checked on every keystroke, so a name the new
+    // filesystem will not take says so while the field is still open rather
+    // than after the drive has been erased to hold it.
+    readonly property var formatCheck: formatting
+      ? Model.validateFormat(drives.fsCapabilities, volume, drives.deviceOfVolume(volume),
+                             { fsPath: volume.fsPath, fstype: root.formatType,
+                               label: formatLabelField.text, quick: root.formatQuick })
+      : null
+    readonly property int formatRoom: formatting
+      ? Model.labelRemaining(Model.formatTarget(root.formatType), formatLabelField.text)
+      : 0
+    readonly property bool formatReady: formatting && formatCheck !== null && formatCheck.ok
+      && Model.formatConfirmed(volume, confirmField.text)
+
     // Live while the field is open, so a name two characters too long says so
     // before Enter rather than after a round trip that unmounted the drive.
     readonly property var labelCheck: renamingLabel && volume
@@ -1051,6 +1142,16 @@ Panel {
       root.finishUnlock()
     }
 
+    // The confirmation is checked here as well as on the button, because Enter
+    // in the field reaches this without passing the button's enabled state.
+    function commitFormat() {
+      if (!Model.formatConfirmed(volumeRow.volume, confirmField.text)) return
+      drives.formatVolume(volumeRow.volume, root.formatType, formatLabelField.text, root.formatQuick)
+      root.finishFormat()
+    }
+
+    function cancelFormat() { root.finishFormat() }
+
     hasCursor: selected
     foreground: root.foreground
     implicitHeight: volumeContent.implicitHeight + Style.spacing.rowPaddingX
@@ -1060,11 +1161,13 @@ Panel {
     MouseArea {
       anchors.fill: parent
       hoverEnabled: true
-      cursorShape: volumeRow.actionable && !volumeRow.renamingLabel ? Qt.PointingHandCursor : Qt.ArrowCursor
+      cursorShape: volumeRow.actionable && !volumeRow.renamingLabel && !volumeRow.formatting
+        ? Qt.PointingHandCursor : Qt.ArrowCursor
       onEntered: root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex))
       // A click anywhere on the row mounts or opens it, which is the wrong
-      // answer for someone reaching past a half-typed name to their cursor.
-      onClicked: if (!volumeRow.renamingLabel) root.activateVolume(volumeRow.volume)
+      // answer for someone reaching past a half-typed name to their cursor —
+      // and a mount is the one thing that would take a planned format away.
+      onClicked: if (!volumeRow.renamingLabel && !volumeRow.formatting) root.activateVolume(volumeRow.volume)
     }
 
     RowLayout {
@@ -1157,6 +1260,118 @@ Panel {
           Keys.onEscapePressed: volumeRow.cancelUnlock()
         }
 
+        // Erasing the volume and putting a new filesystem on it. Three
+        // separate answers — which filesystem, what to call it, and the
+        // volume's own kernel name typed out — because this is the only thing
+        // in the panel that destroys what is already there on purpose.
+        ColumnLayout {
+          visible: volumeRow.formatting
+          Layout.fillWidth: true
+          spacing: Style.space(4)
+
+          Flow {
+            Layout.fillWidth: true
+            spacing: Style.space(8)
+
+            Repeater {
+              model: Model.formatTypes(drives.fsCapabilities)
+
+              Text {
+                id: typeChip
+                required property var modelData
+
+                textFormat: Text.PlainText
+                text: Model.formatFsType(typeChip.modelData)
+                color: root.formatType === typeChip.modelData ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: root.formatType === typeChip.modelData
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.formatType = typeChip.modelData
+                }
+              }
+            }
+
+            // Quick writes the new filesystem over what is there; the other
+            // zeroes the drive first, which takes as long as the drive is big
+            // and is the only way the old contents actually go.
+            Text {
+              textFormat: Text.PlainText
+              text: root.formatQuick ? "· Quick" : "· Zero first"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.formatQuick = !root.formatQuick
+              }
+            }
+          }
+
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(6)
+
+            TextField {
+              id: formatLabelField
+              Layout.fillWidth: true
+              foreground: root.foreground
+              verticalPadding: Style.space(2)
+              placeholderText: "Name for the new filesystem"
+              onVisibleChanged: if (visible) text = ""
+            }
+
+            // Counts down against the filesystem being created, not the one
+            // being replaced: the same field allows sixteen characters on ext4
+            // and eleven on exFAT.
+            Text {
+              textFormat: Text.PlainText
+              text: volumeRow.formatRoom
+              color: volumeRow.formatRoom < 0 ? root.urgent : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              Layout.alignment: Qt.AlignVCenter
+            }
+          }
+
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(6)
+
+            TextField {
+              id: confirmField
+              Layout.fillWidth: true
+              foreground: root.foreground
+              verticalPadding: Style.space(2)
+              placeholderText: volumeRow.volume
+                ? "Type " + Model.formatToken(volumeRow.volume) + " to erase it"
+                : ""
+              onVisibleChanged: if (visible) {
+                text = ""
+                Qt.callLater(function() { confirmField.forceActiveFocus() })
+              }
+              onAccepted: volumeRow.commitFormat()
+              Keys.onEscapePressed: volumeRow.cancelFormat()
+            }
+
+            PanelActionButton {
+              iconText: Model.GLYPH_ERASER
+              tooltipText: "Erase this volume and create the filesystem"
+              foreground: volumeRow.formatReady ? root.urgent : root.dim
+              hoverColor: root.urgent
+              fontFamily: root.fontFamily
+              enabled: !drives.busy && volumeRow.formatReady
+              Layout.alignment: Qt.AlignVCenter
+              onClicked: volumeRow.commitFormat()
+            }
+          }
+        }
+
         Text {
           textFormat: Text.PlainText
           Layout.fillWidth: true
@@ -1166,14 +1381,19 @@ Panel {
               if (volumeRow.labelCheck && !volumeRow.labelCheck.ok) return volumeRow.labelCheck.message
               return "Enter renames the filesystem · Esc cancels"
             }
+            if (volumeRow.formatting) {
+              if (volumeRow.formatCheck && !volumeRow.formatCheck.ok) return volumeRow.formatCheck.reason
+              return Model.formatWarning(volumeRow.volume) + " Esc cancels."
+            }
             return volumeRow.working ? "Working…" : drives.metaFor(volumeRow.volume)
           }
-          color: volumeRow.renamingLabel && volumeRow.labelCheck && !volumeRow.labelCheck.ok
+          color: volumeRow.formatting
+            || (volumeRow.renamingLabel && volumeRow.labelCheck && !volumeRow.labelCheck.ok)
             ? root.urgent : root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideMiddle
-          wrapMode: volumeRow.renamingLabel ? Text.WordWrap : Text.NoWrap
+          wrapMode: volumeRow.renamingLabel || volumeRow.formatting ? Text.WordWrap : Text.NoWrap
         }
 
         // Usage bar, drawn only for mounted volumes: an unmounted partition
@@ -1290,6 +1510,23 @@ Panel {
           if (volumeRow.canCheck) drives.checkVolume(volumeRow.volume)
           else drives.installCheckTools(volumeRow.volume)
         }
+      }
+
+      // Only ever on an unmounted volume of a drive the panel tracks, so it is
+      // not on screen at all for the drive somebody is in the middle of using
+      // — and opening the editor is still only the first of the two things a
+      // format takes.
+      PanelActionButton {
+        visible: volumeRow.formattable && !volumeRow.formatting
+        iconText: Model.GLYPH_ERASER
+        tooltipText: "Format — erases this volume and creates a new filesystem on it"
+        foreground: root.dim
+        hoverColor: root.urgent
+        fontFamily: root.fontFamily
+        enabled: !drives.busy
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex)) }
+        onClicked: root.beginFormat(volumeRow.volume)
       }
 
       PanelActionButton {
