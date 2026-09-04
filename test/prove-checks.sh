@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Proves test/wiring.test.js fails when each invariant it claims to guard is
-# broken. A check nobody has watched fail is a check nobody knows works, and
-# the cross-file ones are exactly the kind that quietly stop matching the code.
+# Proves wiring.test.js and shell.test.js fail when each invariant they claim
+# to guard is broken. A check nobody has watched fail is a check nobody knows
+# works, and these are exactly the kind that quietly stop matching the code.
 #
 # Each case copies the plugin to a scratch directory, breaks one thing, and
-# expects a non-zero exit. Run with: bash test/prove-wiring.sh
+# expects a non-zero exit. Run with: bash test/prove-checks.sh
 set -u
 
 SRC=$(cd "$(dirname "$0")/.." && pwd)
@@ -15,12 +15,12 @@ pass=0
 missed=0
 
 attempt() {
-  local name=$1 mutate=$2
+  local name=$1 mutate=$2 suite=${3:-wiring}
   rm -rf "$LAB/repo"
   cp -r "$SRC" "$LAB/repo"
   rm -rf "$LAB/repo/.git"
   ( cd "$LAB/repo" && eval "$mutate" )
-  if ( cd "$LAB/repo" && node test/wiring.test.js >/dev/null 2>&1 ); then
+  if ( cd "$LAB/repo" && node "test/$suite.test.js" >/dev/null 2>&1 ); then
     echo "  MISSED $name"
     missed=$((missed + 1))
   else
@@ -66,6 +66,25 @@ attempt "a documentation line using a word the capability scan flags" \
 
 attempt "an entry point naming a file that is not there" \
   "node -e 'const m=require(\"./manifest.json\");m.entryPoints.barWidget=\"Missing.qml\";require(\"fs\").writeFileSync(\"manifest.json\",JSON.stringify(m,null,2))'"
+
+attempt "a shell mistake inside an embedded script" \
+  "sed -i \"s|'set -u',|'set -u',\\n    'cd /tmp',|\" Service.qml" \
+  shell
+
+# The parser in shell.test.js reads `readonly property string`. A script that
+# drops the keyword is still a script, and would be linted by nothing at all.
+attempt "a script written in a shape the extractor cannot read" \
+  "sed -i 's|readonly property string formatScript:|property string formatScript:|' Service.qml" \
+  shell
+
+# The only case that breaks a check rather than the code it reads. The map from
+# a line of shell back to the line of Service.qml it was written on has no
+# source-side mutation that would show it wrong, so the mapping itself is what
+# gets moved: to the end of each element instead of the start, which is the same
+# line for a one-line element and the wrong one for every element that wraps.
+attempt "a line map that points at the wrong source line" \
+  "sed -i 's|lineOf(element.start)|lineOf(element.end)|' test/shell.test.js" \
+  shell
 
 echo
 echo "caught $pass, missed $missed"

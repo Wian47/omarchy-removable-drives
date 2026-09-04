@@ -63,7 +63,7 @@ jobs:
           echo "nothing the capability scan would flag"
 
   qml:
-    name: QML syntax and wiring
+    name: QML syntax, wiring, and shell
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -71,10 +71,10 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Install the Qt QML tools
+      - name: Install the Qt QML tools and shellcheck
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qt6-declarative-dev-tools
+          sudo apt-get install -y -qq qt6-declarative-dev-tools shellcheck
 
       # qmlformat rather than qmllint, which was the obvious choice and the
       # wrong one. qmllint resolves types, and every Quickshell and `qs.*` type
@@ -112,9 +112,17 @@ jobs:
           export PATH=/usr/lib/qt6/bin:$PATH
           node test/wiring.test.js
 
+      # Service.qml keeps eight shell scripts in string arrays, and shellcheck
+      # cannot open a QML property. So the scripts are pulled back out of the
+      # source and linted as the shell they become. Model.js decides whether a
+      # format may run and is covered by 237 tests. formatScript is what erases
+      # the drive, and until this step existed nothing but a person had read it.
+      - name: The shell inside Service.qml passes shellcheck
+        run: node test/shell.test.js
+
       # A check nobody has watched fail is a check nobody knows works. This
       # breaks each invariant in a scratch copy and expects the check to catch it.
-      - name: The wiring checks catch what they claim to
+      - name: The checks catch what they claim to
         run: |
           export PATH=/usr/lib/qt6/bin:$PATH
-          bash test/prove-wiring.sh
+          bash test/prove-checks.sh

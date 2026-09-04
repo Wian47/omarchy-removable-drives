@@ -313,6 +313,7 @@ candidate of a mounted removable volume. The tests assert it refuses `/`,
 
 ```bash
 node test/model.test.js       # 237 tests, no compositor required
+node test/shell.test.js       # shellcheck over the shell inside Service.qml
 omarchy plugin validate .     # the same check the shell applies
 ```
 

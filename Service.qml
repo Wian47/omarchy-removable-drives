@@ -661,7 +661,7 @@ Item {
     '  [ -r "$guardfile" ] || return 0',
     '  old=$(cat "$guardfile" 2>/dev/null)',
     '  case "$old" in ""|*[!0-9]*) return 0 ;; esac',
-    '  case "$(tr -d \'\\000\' < /proc/$old/cmdline 2>/dev/null)" in',
+    '  case "$(tr -d \'\\000\' < /proc/"$old"/cmdline 2>/dev/null)" in',
     // The whole group, not just the inhibitor. systemd-inhibit spawns the
     // process that waits for the signal, and killing only the parent leaves
     // that child alive — reparented, still holding a gdbus monitor, blocked
@@ -711,6 +711,11 @@ Item {
     // setsid so the inhibitor leads its own process group: that is what makes
     // the whole tree killable as one, rather than by name — and this script's
     // own command line contains every name a pattern would match.
+    //
+    // The nested bash -c body stays in single quotes on purpose: its $1 to
+    // $3 are the inner shell's arguments, and expanding them here would
+    // hand the inhibitor three empty strings.
+    '  # shellcheck disable=SC2016',
     '  setsid systemd-inhibit --what=sleep --mode=delay --who="Removable Drives"' +
       ' --why="Unmounting removable drives" \\',
     "    bash -c 'wait_for_sleep_signal true; unmount_targets \"$1\" \"$2\" \"$3\"'" +
