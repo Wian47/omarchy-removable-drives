@@ -576,21 +576,45 @@ Item {
   // Unmount everything, re-lock anything that was unlocked, then cut power.
   // `set -e` stops at the first failure so a busy filesystem surfaces as an
   // error instead of a half-ejected drive, and power-off is allowed to fail
-  // on hubs and card readers that don't implement it — by then the drive is
-  // already safe to pull.
+  // on hubs and card readers that don't implement it.
+  //
+  // That allowance also hides udisks refusing to power off a mounted drive,
+  // and the unmounts come from a snapshot that misses whatever was mounted
+  // after it was taken. So the kernel is asked before the failure is ignored.
+  // A device that is already gone has nothing left to ask about: the other
+  // slot of the same card reader may have been powered off just before it.
+  readonly property string ejectScript: [
+    'set -eu',
+    'while [ $# -gt 0 ]; do',
+    '  if [ "$1" = power-off ]; then',
+    '    if [ -e "$2" ]; then',
+    '      mounts=$(lsblk -nro MOUNTPOINT "$2")',
+    '      if [ -n "$mounts" ]; then',
+    '        echo "$2 still has a mounted volume and was not powered off" >&2',
+    '        exit 1',
+    '      fi',
+    '    fi',
+    '    udisksctl power-off --no-user-interaction -b "$2" || true',
+    '  else',
+    '    udisksctl "$1" --no-user-interaction -b "$2"',
+    '  fi',
+    '  shift 2',
+    'done'
+  ].join("\n")
+
   function runEject(list) {
     if (!list || list.length === 0 || busy) return
-    var script = "set -e\n"
+    var command = ["bash", "-c", ejectScript, "removable-drives"]
     var titles = []
     for (var d = 0; d < list.length; d++) {
       var device = list[d]
       titles.push(device.title)
       for (var v = 0; v < device.volumes.length; v++) {
         var volume = device.volumes[v]
-        if (volume.mounted) script += "udisksctl unmount --no-user-interaction -b " + quote(volume.fsPath) + "\n"
-        if (volume.encrypted && volume.unlocked) script += "udisksctl lock --no-user-interaction -b " + quote(volume.path) + "\n"
+        if (volume.mounted) command.push("unmount", volume.fsPath)
+        if (volume.encrypted && volume.unlocked) command.push("lock", volume.path)
       }
-      script += "udisksctl power-off --no-user-interaction -b " + quote(device.path) + " || true\n"
+      command.push("power-off", device.path)
 
       // Remember that this one is meant to disappear, so its removal is not
       // reported back to the user as an accident.
@@ -598,7 +622,7 @@ Item {
       expected[device.path] = true
       _expectedRemovals = expected
     }
-    runAction(["bash", "-c", script], list.length === 1 ? list[0].path : "*", "eject",
+    runAction(command, list.length === 1 ? list[0].path : "*", "eject",
               "Safe to remove " + titles.join(", "))
   }
 

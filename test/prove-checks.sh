@@ -41,7 +41,7 @@ attempt "a panel binding to a service property that does not exist" \
   "sed -i '0,/drives\.devices/s//drives.deviceList/' Panel.qml"
 
 attempt "a device path concatenated into a command instead of quoted" \
-  "sed -i 's|\"udisksctl power-off --no-user-interaction -b \" + quote(device.path)|\"udisksctl power-off --no-user-interaction -b \" + device.path|' Service.qml"
+  "sed -i 's|command + \" \" + quote(volume.mountpoint)|command + \" \" + volume.mountpoint|' Service.qml"
 
 attempt "a scripting verb the README promises but nothing handles" \
   "sed -i 's|omarchy-shell removable-drives toggle|omarchy-shell removable-drives defragment|' README.md"
@@ -88,6 +88,10 @@ attempt "a line map that points at the wrong source line" \
 
 attempt "a trash folder emptied without checking for a symlink" \
   "sed -i 's|if \[ .*realpath -m -- .*!= .*then|if false; then|' Service.qml" \
+  shell
+
+attempt "an eject that ignores a volume still mounted" \
+  "sed -i 's|if \[ -n \"\$mounts\" \]; then|if false; then|' Service.qml" \
   shell
 
 echo

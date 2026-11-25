@@ -246,11 +246,31 @@ function inLab(fn) {
   }
 }
 
-function runScript(name, args) {
+function runScript(name, args, bin) {
   const script = scripts.find(candidate => candidate.name === name)
   if (!script) throw new Error(name + " is not in Service.qml")
+  const env = bin ? { ...process.env, PATH: bin + path.delimiter + process.env.PATH } : process.env
   return spawnSync("bash", ["-c", script.shell, "removable-drives", ...args],
-                   { encoding: "utf8", timeout: 10000 })
+                   { encoding: "utf8", timeout: 10000, env })
+}
+
+// Replaces commands with one-line stand-ins, so nothing reaches a real drive.
+// udisksctl is always one of them, and records what it was asked to do.
+function stubCommands(lab, stubs) {
+  const bin = path.join(lab, "bin")
+  const log = path.join(lab, "calls")
+  fs.mkdirSync(bin)
+  fs.writeFileSync(log, "")
+  const all = { udisksctl: "true", ...stubs }
+  all.udisksctl = `printf '%s\\n' "$*" >> '${log}'; ${all.udisksctl}`
+  for (const name of Object.keys(all)) {
+    fs.writeFileSync(path.join(bin, name), `#!/usr/bin/env bash\n${all[name]}\n`, { mode: 0o755 })
+  }
+  return {
+    bin,
+    calls: () => fs.readFileSync(log, "utf8").split("\n").filter(Boolean)
+      .map(line => line.replace(" --no-user-interaction", ""))
+  }
 }
 
 check("a trash folder reached through a symlink is neither counted nor emptied", () => inLab(lab => {
@@ -284,6 +304,54 @@ check("a real trash folder is counted and emptied, whatever the drive is called"
   assert.ok(!fs.existsSync(trash), "the trash is still there")
   assert.strictEqual(runScript("trashEmptyScript", [trash]).status, 0,
     "a trash that is already gone is not an error")
+}))
+
+check("eject does not report success over a volume that is still mounted", () => inLab(lab => {
+  const device = path.join(lab, "sdb")
+  fs.writeFileSync(device, "")
+  const stub = stubCommands(lab, { lsblk: "printf '\\n/run/media/x/B\\n'" })
+
+  const result = runScript("ejectScript", ["unmount", "/dev/sdb1", "power-off", device], stub.bin)
+  assert.notStrictEqual(result.status, 0)
+  assert.match(result.stderr, /still has a mounted volume/)
+  assert.deepStrictEqual(stub.calls(), ["unmount -b /dev/sdb1"])
+}))
+
+check("eject unmounts, locks, then powers off, in that order", () => inLab(lab => {
+  const device = path.join(lab, "sd b")
+  fs.writeFileSync(device, "")
+  const stub = stubCommands(lab, { lsblk: "printf '\\n\\n'" })
+
+  const result = runScript("ejectScript",
+    ["unmount", "/dev/mapper/luks-x", "lock", "/dev/sdb1", "power-off", device], stub.bin)
+  assert.strictEqual(result.status, 0, result.stderr)
+  assert.deepStrictEqual(stub.calls(),
+    ["unmount -b /dev/mapper/luks-x", "lock -b /dev/sdb1", "power-off -b " + device])
+}))
+
+check("eject survives a reader that cannot power off, and a device already gone", () => inLab(lab => {
+  const device = path.join(lab, "sdb")
+  fs.writeFileSync(device, "")
+  const stub = stubCommands(lab, { lsblk: "echo", udisksctl: "exit 1" })
+
+  const result = runScript("ejectScript",
+    ["power-off", device, "power-off", path.join(lab, "sdc")], stub.bin)
+  assert.strictEqual(result.status, 0, result.stderr)
+}))
+
+check("eject stops at the first unmount that fails", () => inLab(lab => {
+  const stub = stubCommands(lab, { udisksctl: "exit 1" })
+  const result = runScript("ejectScript", ["unmount", "/dev/sdb1", "power-off", "/dev/sdb"], stub.bin)
+  assert.notStrictEqual(result.status, 0)
+  assert.deepStrictEqual(stub.calls(), ["unmount -b /dev/sdb1"])
+}))
+
+check("eject does not treat an unreadable mount list as nothing mounted", () => inLab(lab => {
+  const device = path.join(lab, "sdb")
+  fs.writeFileSync(device, "")
+  const stub = stubCommands(lab, { lsblk: "exit 1" })
+  assert.notStrictEqual(runScript("ejectScript", ["power-off", device], stub.bin).status, 0)
+  assert.deepStrictEqual(stub.calls(), [])
 }))
 
 console.log("")
