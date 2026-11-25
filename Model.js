@@ -222,6 +222,14 @@ function isMountable(volume) {
   return UNMOUNTABLE.indexOf(volume.fstype) === -1
 }
 
+function canEverMount(device) {
+  var volumes = (device && device.volumes) || []
+  for (var i = 0; i < volumes.length; i++) {
+    if (volumes[i].mounted || isMountable(volumes[i]) || canUnlock(volumes[i])) return true
+  }
+  return false
+}
+
 function buildDevice(node) {
   var volumes = []
   var kids = node.children || []

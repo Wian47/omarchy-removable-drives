@@ -102,6 +102,16 @@ test("reports an empty, unformatted disk with no volumes", () => {
   assert.strictEqual(devices[0].volumes.length, 0)
 })
 
+test("a drive can be mounted one day if anything on it is mountable, mounted or locked", () => {
+  const holding = overrides => api.parse(tree([disk({ children: [part(overrides)] })]))[0]
+  assert.strictEqual(api.canEverMount(holding({})), true)
+  assert.strictEqual(api.canEverMount(holding({ mountpoint: "/run/media/x/STICK" })), true)
+  assert.strictEqual(api.canEverMount(holding({ fstype: "crypto_LUKS" })), true)
+  assert.strictEqual(api.canEverMount(holding({ fstype: "swap" })), false)
+  assert.strictEqual(api.canEverMount(holding({ fstype: null })), false)
+  assert.strictEqual(api.canEverMount(null), false)
+})
+
 console.log("\nLUKS")
 
 test("a locked partition is encrypted, not mountable, and not unlocked", () => {

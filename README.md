@@ -155,9 +155,11 @@ drive:
 }
 ```
 
-`onConnect` runs through `bash -c` when that drive appears, with `$1` as its
-device path, `$2` as its first mount point, and `$3` as a file it may write
-progress to. Nothing writes it for you.
+`onConnect` runs through `bash -c` once that drive is connected and mounted,
+with `$1` as its device path, `$2` as its first mount point, and `$3` as a file
+it may write progress to. A locked drive counts as connected once it is
+unlocked and mounted, and only a drive with nothing to mount gets an empty
+`$2`. Nothing writes it for you.
 
 ### Reporting progress from a hook
 
@@ -316,7 +318,7 @@ The tests assert it refuses `/`, `$HOME`, the mount root, a symlinked trash
 folder, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 239 tests, no compositor required
+node test/model.test.js       # 240 tests, no compositor required
 node test/shell.test.js       # lints and runs the shell inside Service.qml
 node test/service.test.js     # runs the functions inside Service.qml
 omarchy plugin validate .     # the same check the shell applies

@@ -154,5 +154,62 @@ test("fixing the file clears the complaint and saving works again", () => {
     [{ version: 1, drives: { "serial:S1": { readOnly: true, nickname: "Backup" } } }])
 })
 
+console.log("\nconnect hooks")
+
+const HOOKED = '{"drives":{"serial:S1":{"onConnect":"backup"}}}'
+
+// The arguments the user's command was given, for every hook that was started.
+function hooksRun(drives) {
+  return drives.detached.filter(command => command[2] === drives.hookScript)
+    .map(command => ({ device: command[6], mountpoint: command[7] }))
+}
+
+function hooked() {
+  const drives = service()
+  drives.loadStore(HOOKED)
+  drives.applySnapshot(NOTHING)
+  return drives
+}
+
+test("a hook waits for the drive to be mounted, then runs once", () => {
+  const drives = hooked()
+  drives.applySnapshot(snapshot())
+  assert.deepStrictEqual(hooksRun(drives), [], "ran with no mount point")
+  drives.applySnapshot(snapshot({}, MOUNTED))
+  drives.applySnapshot(snapshot({}, MOUNTED))
+  assert.deepStrictEqual(hooksRun(drives), [{ device: "/dev/sdb", mountpoint: "/run/media/x/STICK" }])
+})
+
+test("a locked drive's hook waits for it to be unlocked and mounted", () => {
+  const drives = hooked()
+  drives.applySnapshot(snapshot({}, { fstype: "crypto_LUKS" }))
+  assert.deepStrictEqual(hooksRun(drives), [])
+  drives.applySnapshot(snapshot({}, { fstype: "crypto_LUKS", children: [
+    { name: "luks-x", path: "/dev/mapper/luks-x", type: "crypt", fstype: "ext4", mountpoint: "/run/media/x/VAULT" }
+  ] }))
+  assert.deepStrictEqual(hooksRun(drives), [{ device: "/dev/sdb", mountpoint: "/run/media/x/VAULT" }])
+})
+
+test("a drive with nothing to mount still gets its hook", () => {
+  const drives = hooked()
+  drives.applySnapshot(snapshot({}, { fstype: "swap" }))
+  assert.deepStrictEqual(hooksRun(drives), [{ device: "/dev/sdb", mountpoint: "" }])
+})
+
+test("a hook still waiting when the drive goes does not run for the next one", () => {
+  const drives = hooked()
+  drives.applySnapshot(snapshot())
+  drives.applySnapshot(NOTHING)
+  assert.deepStrictEqual(drives._hooksWaiting, {})
+})
+
+test("a drive attached before the shell started does not run its hook", () => {
+  const drives = service()
+  drives.loadStore(HOOKED)
+  drives.applySnapshot(snapshot({}, MOUNTED))
+  drives.applySnapshot(snapshot({}, MOUNTED))
+  assert.deepStrictEqual(hooksRun(drives), [])
+})
+
 console.log(failures === 0 ? "\nAll service tests passed." : `\n${failures} service test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

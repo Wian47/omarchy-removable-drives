@@ -164,6 +164,9 @@ Item {
   property var _previousDevices: []
   property var _expectedRemovals: ({})
   property bool _seenFirstSnapshot: false
+
+  // Drives that have arrived and whose hook has not run yet, by device path.
+  property var _hooksWaiting: ({})
   property int _quietTicks: 0
 
   // One quiet sample is not enough to call a copy finished: throughput dips to
@@ -262,6 +265,7 @@ Item {
     // every login.
     if (_seenFirstSnapshot) announceChanges(diff)
     _seenFirstSnapshot = true
+    runWaitingHooks()
 
     if (watchClosely) probeTrash()
     probeCapabilities()
@@ -295,10 +299,11 @@ Item {
     for (i = 0; i < diff.added.length; i++) {
       var added = diff.added[i]
       notify(added.title + " connected", Model.connectedSummary(added), added.glyph)
-      runConnectHook(added)
+      _hooksWaiting[added.path] = true
     }
     for (i = 0; i < diff.removed.length; i++) {
       var gone = diff.removed[i]
+      delete _hooksWaiting[gone.path]
       // We powered this one off ourselves and already said "safe to remove".
       if (_expectedRemovals[gone.path]) {
         var seen = _expectedRemovals
@@ -867,6 +872,19 @@ Item {
     'printf %s "$$" > "$file.pid"',
     'bash -c "$5" removable-drives "$3" "$4" "$file"'
   ].join("\n")
+
+  // A drive is announced before anything has had time to mount it, and a hook
+  // handed an empty mount point would work on "/" instead of the drive. So it
+  // waits for one, unless nothing on the drive could ever provide it.
+  function runWaitingHooks() {
+    for (var i = 0; i < devices.length; i++) {
+      var device = devices[i]
+      if (!_hooksWaiting[device.path]) continue
+      if (mountpointOf(device) === "" && Model.canEverMount(device)) continue
+      delete _hooksWaiting[device.path]
+      runConnectHook(device)
+    }
+  }
 
   function runConnectHook(device) {
     var command = String(driveSetting(device, "onConnect", "")).replace(/^\s+|\s+$/g, "")
