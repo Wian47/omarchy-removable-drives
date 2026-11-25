@@ -331,8 +331,7 @@ Panel {
     function eject(path: string): string {
       for (var i = 0; i < drives.devices.length; i++) {
         if (drives.devices[i].path === path) {
-          drives.eject(drives.devices[i])
-          return "ok"
+          return drives.eject(drives.devices[i])
         }
       }
       return "unknown device: " + path
@@ -407,11 +406,7 @@ Panel {
       return "unknown device: " + path
     }
 
-    function ejectAll(): string {
-      if (drives.devices.length === 0) return "no drives attached"
-      drives.ejectAll()
-      return "ok"
-    }
+    function ejectAll(): string { return drives.ejectAll() }
 
     // "busy" while the kernel still has I/O in flight or a drive is running
     // its connect hook — a script can poll this before telling someone it is

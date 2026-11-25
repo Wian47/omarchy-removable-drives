@@ -567,25 +567,29 @@ Item {
   // this widget exists to prevent, so the request is held rather than refused
   // and runs by itself the moment the drive goes quiet.
   function eject(device) {
-    if (!device || busy) return
+    if (!device) return "unknown device"
+    if (busy) return refuse("Another action is still running")
     if (isDeviceBusy(device)) {
       pendingEjectPath = device.path
       _quietTicks = 0
       actionStatus = "Waiting for writes to finish on " + device.title + "…"
-      return
+    } else {
+      runEject([device])
     }
-    runEject([device])
+    return "ok"
   }
 
   function ejectAll() {
-    if (busy || devices.length === 0) return
+    if (devices.length === 0) return "no drives attached"
+    if (busy) return refuse("Another action is still running")
     if (anyBusy) {
       pendingEjectPath = "*"
       _quietTicks = 0
       actionStatus = "Waiting for writes to finish…"
-      return
+    } else {
+      runEject(devices)
     }
-    runEject(devices)
+    return "ok"
   }
 
   // Unmount everything, re-lock anything that was unlocked, then cut power.

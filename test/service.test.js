@@ -286,6 +286,27 @@ test("a held eject waits for another action rather than being dropped", () => {
   assert.strictEqual(drives.actionProcess.started.length, 2, "the eject never ran")
 })
 
+test("an eject that cannot run says why instead of ok", () => {
+  const drives = service()
+  assert.strictEqual(drives.ejectAll(), "no drives attached")
+  drives.applySnapshot(snapshot({}, MOUNTED))
+  drives.actionProcess.running = true
+  for (const answer of [drives.eject(drives.devices[0]), drives.ejectAll()]) {
+    assert.strictEqual(answer, "Another action is still running")
+  }
+  assert.strictEqual(drives.actionProcess.started.length, 1)
+  drives.actionProcess.running = false
+  assert.strictEqual(drives.eject(drives.devices[0]), "ok")
+})
+
+test("an eject that is held is an eject that will run", () => {
+  const drives = service()
+  drives.applySnapshot(snapshot({}, MOUNTED))
+  drives.activity = BUSY
+  assert.strictEqual(drives.eject(drives.devices[0]), "ok")
+  assert.strictEqual(drives.ejectAll(), "ok")
+})
+
 const warnings = drives => drives.detached.filter(command => command.includes("Removed while still mounted")).length
 
 test("a drive whose eject failed still warns when it is pulled", () => {

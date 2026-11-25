@@ -242,6 +242,17 @@ check("every scripting verb the README documents is handled", () => {
     .map(verb => `README documents "${verb}", which the IpcHandler does not define`)
 })
 
+// The README promises that anything but "ok" is the reason nothing happened, so
+// an answer made up beside the call is a refusal a script never hears about.
+check("an eject called by a script answers with what the service said", () => {
+  return [["eject", /return drives\.eject\(/], ["ejectAll", /return drives\.ejectAll\(\)/]]
+    .filter(([verb, returned]) => {
+      const start = panelSource.indexOf(`    function ${verb}(`)
+      return !returned.test(panelSource.slice(start, panelSource.indexOf("    function ", start + 8)))
+    })
+    .map(([verb]) => `the IpcHandler's "${verb}" does not return what drives.${verb} said`)
+})
+
 check("every scripting verb the handler defines is documented", () => {
   const documented = documentedVerbs()
   return ipcVerbs()
