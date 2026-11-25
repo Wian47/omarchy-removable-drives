@@ -1033,7 +1033,7 @@ test("each filesystem carries its own label ceiling", () => {
   assert.strictEqual(api.labelLimit("ext4"), 16)
   assert.strictEqual(api.labelLimit("xfs"), 12)
   assert.strictEqual(api.labelLimit("ntfs"), 128)
-  assert.strictEqual(api.labelLimit("btrfs"), 256)
+  assert.strictEqual(api.labelLimit("btrfs"), 255)
 })
 
 test("a filesystem with no tool to write its label cannot be renamed", () => {
@@ -1094,6 +1094,42 @@ test("the counter goes negative once the name is too long", () => {
   assert.strictEqual(api.labelRemaining(volume({}), ""), 11)
   assert.strictEqual(api.labelRemaining(volume({}), "STICK"), 6)
   assert.strictEqual(api.labelRemaining(volume({}), "WAYTOOLONGLABEL"), -4)
+})
+
+// The longest run of each letter libblockdev's own bd_fs_*_check_label accepts,
+// measured against libblockdev 3. Btrfs is one byte shorter, as mkfs.btrfs is.
+test("a label is measured the way each filesystem measures it", () => {
+  const longest = (fstype, letter) => {
+    let count = 0
+    while (api.validateLabel(volume({ fstype }), letter.repeat(count + 1)).ok) count++
+    return count
+  }
+  for (const [fstype, ascii, cyrillic, euro] of [
+    ["exfat", 11, 11, 11], ["ext4", 16, 8, 5], ["ntfs", 128, 64, 42], ["btrfs", 255, 127, 85],
+    ["xfs", 12, 6, 4], ["f2fs", 512, 256, 170], ["nilfs2", 80, 40, 26], ["udf", 126, 63, 63]
+  ]) {
+    assert.deepStrictEqual([longest(fstype, "A"), longest(fstype, "Ж"), longest(fstype, "€")],
+      [ascii, cyrillic, euro], fstype)
+  }
+  assert.strictEqual(longest("udf", "é"), 126)
+  assert.strictEqual(longest("exfat", "😀"), 5)
+  assert.strictEqual(longest("ext4", "😀"), 4)
+})
+
+test("FAT32 refuses any letter its tools cannot write", () => {
+  for (const label of ["СНИМКИ", "CAFÉ", "😀", "TAB\tBED"]) {
+    const result = api.validateLabel(volume({}), label)
+    assert.strictEqual(result.ok, false, label)
+    assert.match(result.message, /plain Latin letters/)
+  }
+  assert.strictEqual(api.validateLabel(volume({}), "MY-DISK_1 ~").ok, true)
+})
+
+test("a label too long in bytes says so, and the counter agrees", () => {
+  const result = api.validateLabel(volume({ fstype: "ext4" }), "СНИМКИ БГ")
+  assert.strictEqual(result.ok, false)
+  assert.match(result.message, /at most 16 bytes.*that is 1 too many/)
+  assert.strictEqual(api.labelRemaining(volume({ fstype: "ext4" }), "СНИМКИ БГ"), -1)
 })
 
 test("a filesystem we cannot label is refused rather than validated", () => {
@@ -1450,6 +1486,15 @@ test("a label the target filesystem forbids is refused before the drive is touch
     plan({ fstype: "vfat", label: "MY:DISK" }))
   assert.strictEqual(result.ok, false)
   assert.match(result.reason, /cannot contain :/)
+})
+
+test("a label the tools would fail on is refused before the drive is erased for it", () => {
+  for (const [fstype, label] of [["vfat", "СНИМКИ"], ["ext4", "СНИМКИ БГ 2026!"]]) {
+    assert.strictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE,
+      plan({ fstype, label })).ok, false, fstype)
+  }
+  assert.strictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE,
+    plan({ fstype: "exfat", label: "СНИМКИ БГ" })).ok, true)
 })
 
 test("an empty label is a real answer here too — the drive ships without one", () => {

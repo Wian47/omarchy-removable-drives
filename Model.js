@@ -1282,10 +1282,11 @@ function supportHint(support) {
 // e2label, ntfslabel — and each has its own ceiling. These are libblockdev's
 // numbers, the same ones udisks refuses on, so the field can say "two
 // characters too long" while it is still open rather than after a round trip
-// that unmounted the drive for a write that was never going to land.
+// that unmounted the drive for a write that was never going to land. Btrfs is
+// the exception: libblockdev allows 256, and mkfs.btrfs refuses it.
 var LABEL_LIMITS = {
   vfat: 11, exfat: 11, ext2: 16, ext3: 16, ext4: 16, xfs: 12,
-  ntfs: 128, btrfs: 256, f2fs: 512, nilfs2: 80, udf: 126
+  ntfs: 128, btrfs: 255, f2fs: 512, nilfs2: 80, udf: 126
 }
 
 // The DOS reserved characters, which fatlabel rejects one at a time.
@@ -1294,6 +1295,28 @@ var VFAT_FORBIDDEN = "\"*/:<>?\\|"
 function labelLimit(fstype) {
   var limit = LABEL_LIMITS[clean(fstype)]
   return limit === undefined ? 0 : limit
+}
+
+// What a label costs against that ceiling. Most filesystems count bytes of
+// UTF-8, where anything past ASCII costs two or more. exFAT counts UTF-16 units,
+// which is what a JavaScript string is made of. UDF halves its room as soon as
+// one character does not fit in Latin-1.
+function labelCost(fstype, label) {
+  var i
+  var cost = 0
+  if (fstype === "exfat") return label.length
+  if (fstype === "udf") {
+    for (i = 0; i < label.length; i++) {
+      if (label.charCodeAt(i) > 0xFF) return label.length * 2
+    }
+    return label.length
+  }
+  for (i = 0; i < label.length; i++) {
+    var code = label.charCodeAt(i)
+    // Two for each half of a surrogate pair, which makes four for the pair.
+    cost += code < 0x80 ? 1 : code < 0x800 || (code >= 0xD800 && code <= 0xDFFF) ? 2 : 3
+  }
+  return cost
 }
 
 // Renaming needs a filesystem that is readable and whose tool we know a limit
@@ -1323,12 +1346,18 @@ function validateLabel(volume, label) {
   }
 
   var value = normaliseLabel(label)
-  if (value.length > limit) {
+  var cost = labelCost(fstype, value)
+  if (fstype === "vfat" && /[^\x20-\x7e]/.test(value)) {
+    return { ok: false, label: value, message: fs + " labels can only use plain Latin letters, digits and symbols" }
+  }
+  if (cost > limit) {
     return {
       ok: false,
       label: value,
-      message: fs + " labels are at most " + limit + " characters — that is " +
-               (value.length - limit) + " too many"
+      message: cost === value.length
+        ? fs + " labels are at most " + limit + " characters — that is " + (cost - limit) + " too many"
+        : fs + " labels are at most " + limit + " bytes, and some letters take more than one — that is " +
+          (cost - limit) + " too many"
     }
   }
   if (fstype === "vfat") {
@@ -1349,7 +1378,7 @@ function validateLabel(volume, label) {
 function labelRemaining(volume, label) {
   var limit = volume ? labelLimit(volume.fstype) : 0
   if (limit === 0) return 0
-  return limit - normaliseLabel(label).length
+  return limit - labelCost(clean(volume.fstype), normaliseLabel(label))
 }
 
 // udisks answers "can you fsck this?" itself, and when the answer is no it
