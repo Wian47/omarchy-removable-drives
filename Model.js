@@ -1786,13 +1786,8 @@ function selftestFailed(status) {
   return s === "fatal" || s.indexOf("error") !== -1
 }
 
-// Each line is a property name, the type signature busctl printed, then the
-// value — "SmartTemperature q 306", "SmartFailing b false". The names are what
-// say which interface answered: SmartFailing and SmartPowerOnSeconds are ATA's,
-// SmartCriticalWarning and SmartPowerOnHours are NVMe's, and a drive carrying
-// neither interface answers with nothing at all.
-function parseSmart(raw) {
-  var smart = {
+function noSmart() {
+  return {
     supported: false,
     failing: null,
     temperatureC: null,
@@ -1802,6 +1797,15 @@ function parseSmart(raw) {
     updatedAt: null,
     warnings: null
   }
+}
+
+// Each line is a property name, the type signature busctl printed, then the
+// value — "SmartTemperature q 306", "SmartFailing b false". The names are what
+// say which interface answered: SmartFailing and SmartPowerOnSeconds are ATA's,
+// SmartCriticalWarning and SmartPowerOnHours are NVMe's, and a drive carrying
+// neither interface answers with nothing at all.
+function parseSmart(raw) {
+  var smart = noSmart()
   var lines = String(raw || "").split("\n")
   for (var i = 0; i < lines.length; i++) {
     var match = clean(lines[i]).match(/^(Smart[A-Za-z]+)\s+\S+\s*(.*)$/)
@@ -1824,7 +1828,11 @@ function parseSmart(raw) {
       smart.selftest = clean(value).replace(/"/g, "")
     } else if (name === "SmartUpdated") {
       var at = smartCount(value)
-      smart.updatedAt = at > 0 ? at : null
+      // Zero is udisks saying it has never read this drive, and that nothing
+      // else it reports about its health means anything. A bridge that hides
+      // the drive behind it answers this way, with "not failing" beside it.
+      if (at === 0) return noSmart()
+      smart.updatedAt = at
     } else if (name === "SmartCriticalWarning") {
       // "as 0" when clear, "as 2 \"spare\" \"temperature\"" when not.
       var flags = []

@@ -2039,6 +2039,14 @@ test("a drive with no health to report is unremarkable, not a warning", () => {
     "a thumb drive must not grow a health row it will never fill")
 })
 
+test("a drive whose health was never read is not called healthy", () => {
+  for (const reading of [SMART_NVME, SMART_ATA]) {
+    const smart = api.parseSmart(reading.replace(/SmartUpdated t \d+/, "SmartUpdated t 0"))
+    assert.strictEqual(api.smartVerdict(smart), "unsupported")
+    assert.deepStrictEqual(smart, api.parseSmart(""), "nothing it says about its health means anything")
+  }
+})
+
 test("a drive with nothing wrong with it is healthy", () => {
   assert.strictEqual(api.smartVerdict(api.parseSmart(SMART_NVME)), "healthy")
   assert.strictEqual(api.smartVerdict(api.parseSmart(SMART_ATA)), "healthy")
