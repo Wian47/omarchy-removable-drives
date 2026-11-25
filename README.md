@@ -255,6 +255,10 @@ what percent, and `health` carries each drive's verdict — `unsupported`,
 own verdict in `status` as `healthy`: `true`, `false`, or `null` when the
 answer could not be read.
 
+A check, a repair or a format can take hours, and holds up only the drive it is
+running on; every other drive can still be mounted and ejected meanwhile.
+`working` in `status` says whether any action is running at all.
+
 `smart` returns the whole record, and answers `supported: false` with every
 other field `null` for the many drives that report no health at all.
 

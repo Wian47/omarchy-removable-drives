@@ -610,7 +610,7 @@ Panel {
               foreground: root.foreground
               hoverColor: root.urgent
               fontFamily: root.fontFamily
-              enabled: !drives.busy && drives.blockedFsPath !== ""
+              enabled: drives.blockedFsPath !== "" && !drives.busyWithVolume(drives.volumeByPath(drives.blockedFsPath))
               Layout.alignment: Qt.AlignVCenter
               onClicked: drives.forceUnmountBlocked()
             }
@@ -672,7 +672,7 @@ Panel {
               tooltipText: "Mount read-only so files can be copied off safely"
               foreground: root.foreground
               fontFamily: root.fontFamily
-              enabled: !drives.busy && drives.repairOffered
+              enabled: drives.repairOffered && !drives.busyWithVolume(drives.volumeByPath(drives.checkedFsPath))
               Layout.alignment: Qt.AlignVCenter
               onClicked: drives.mountReadOnly(drives.volumeByPath(drives.checkedFsPath))
             }
@@ -847,6 +847,7 @@ Panel {
     // it for this drive alone.
     readonly property var autoOpen: Model.autoOpenPolicy(Model.driveSettings(drives.store, device).autoOpen)
     readonly property bool mountsReadOnly: Model.shouldMountReadOnly(drives.store, device)
+    readonly property bool blocked: drives.busyWith(device)
     readonly property bool ejectPending: device
       && (drives.pendingEjectPath === device.path || drives.pendingEjectPath === "*")
 
@@ -1072,7 +1073,7 @@ Panel {
         foreground: deviceRow.ejectPending ? root.urgent : root.foreground
         hoverColor: root.urgent
         fontFamily: root.fontFamily
-        enabled: !drives.busy
+        enabled: !deviceRow.blocked
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfDevice(deviceRow.deviceIndex)) }
         onClicked: {
@@ -1166,7 +1167,7 @@ Panel {
         tooltipText: portableRow.entry && portableRow.entry.mounted ? "Unmount" : "Mount"
         foreground: root.foreground
         fontFamily: root.fontFamily
-        enabled: !drives.busy
+        enabled: !drives.busyWith(null)
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfPortable(portableRow.portableIndex)) }
         onClicked: drives.togglePortable(portableRow.entry)
@@ -1187,7 +1188,8 @@ Panel {
       && root.currentRow.volume === volumeIndex
     readonly property bool actionable: volume
       && (volume.mounted || Model.isMountable(volume) || (volume.encrypted && !volume.unlocked))
-    readonly property bool working: volume && drives.busyPath === volume.fsPath
+    readonly property bool working: volume && drives.workingOn(volume.fsPath)
+    readonly property bool blocked: drives.busyWithVolume(volume)
     readonly property real trashBytes: volume ? drives.trashSizeFor(volume) : 0
 
     readonly property bool renamingLabel: volume && root.renamingLabelPath === volume.fsPath
@@ -1560,7 +1562,7 @@ Panel {
             fontFamily: root.fontFamily
             fontSize: Style.font.bodySmall
             size: Style.space(18)
-            enabled: !drives.busy
+            enabled: !volumeRow.blocked
             onClicked: drives.emptyTrash(volumeRow.volume)
           }
         }
@@ -1574,7 +1576,7 @@ Panel {
         tooltipText: "Lock — unmounts and closes the encrypted container"
         foreground: root.foreground
         fontFamily: root.fontFamily
-        enabled: !drives.busy
+        enabled: !volumeRow.blocked
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex)) }
         onClicked: drives.lock(volumeRow.volume)
@@ -1589,7 +1591,7 @@ Panel {
         tooltipText: "Rename this volume — changes the label on the drive itself"
         foreground: root.foreground
         fontFamily: root.fontFamily
-        enabled: !drives.busy
+        enabled: !volumeRow.blocked
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex)) }
         onClicked: root.beginLabelEdit(volumeRow.volume)
@@ -1661,7 +1663,7 @@ Panel {
         }
         foreground: root.foreground
         fontFamily: root.fontFamily
-        enabled: !drives.busy
+        enabled: !volumeRow.blocked
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex)) }
         onClicked: {

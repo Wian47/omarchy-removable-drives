@@ -109,6 +109,15 @@ function snapshot(overrides, partOverrides) {
   return JSON.stringify({ blockdevices: [disk] })
 }
 
+// Two sticks, so that one can be busy while the other is not.
+function twoSticks(partOverrides) {
+  const [first] = JSON.parse(snapshot({}, partOverrides)).blockdevices
+  const [second] = JSON.parse(snapshot(
+    { name: "sdc", path: "/dev/sdc", serial: "S2" },
+    { name: "sdc1", path: "/dev/sdc1", uuid: "BBBB-2222", mountpoint: "/run/media/x/OTHER" })).blockdevices
+  return JSON.stringify({ blockdevices: [first, second] })
+}
+
 const NOTHING = JSON.stringify({ blockdevices: [] })
 const MOUNTED = { mountpoint: "/run/media/x/STICK" }
 
@@ -314,7 +323,7 @@ test("a drive whose eject failed still warns when it is pulled", () => {
   drives.applySnapshot(snapshot({}, MOUNTED))
   drives.eject(drives.devices[0])
   drives.actionProcess.running = false
-  drives.actionProcess.onExited(1)
+  drives.finishAction(drives.actionProcess, 1)
   drives.applySnapshot(snapshot({}, MOUNTED))
   drives.applySnapshot(NOTHING)
   assert.strictEqual(warnings(drives), 1)
@@ -326,7 +335,7 @@ test("a drive that was ejected goes without a warning, even seen mounted on the 
   drives.eject(drives.devices[0])
   drives.applySnapshot(snapshot({}, MOUNTED))
   drives.actionProcess.running = false
-  drives.actionProcess.onExited(0)
+  drives.finishAction(drives.actionProcess, 0)
   drives.applySnapshot(NOTHING)
   assert.strictEqual(warnings(drives), 0)
 })
@@ -349,7 +358,7 @@ test("a format set up for one stick does not run on the one that replaced it", (
   drives.applySnapshot(snapshot({ serial: "S2" }))
   const result = drives.formatVolume(drives.devices[0].volumes[0], "exfat", "", true, view.formattingIdentity)
   assert.match(result, /different volume/)
-  assert.deepStrictEqual(drives.actionProcess.started, [])
+  assert.deepStrictEqual(drives.longProcess.started, [])
 
   view.devices = drives.devices
   view.onRowsChanged()
@@ -367,13 +376,112 @@ test("a format runs on the stick it was set up for", () => {
   assert.strictEqual(view.formattingPath, "/dev/sdb1")
   assert.strictEqual(
     drives.formatVolume(drives.devices[0].volumes[0], "exfat", "", true, view.formattingIdentity), "ok")
-  assert.strictEqual(drives.actionProcess.started.length, 1)
+  assert.strictEqual(drives.longProcess.started.length, 1)
 })
 
 test("a format asked for by a script names its volume and needs no plan made earlier", () => {
   const drives = service({ fsCapabilities: CAPS })
   drives.applySnapshot(snapshot())
   assert.strictEqual(drives.formatVolume(drives.devices[0].volumes[0], "exfat", "", true), "ok")
+})
+
+console.log("\nlong actions")
+
+const CHECKABLE = { check: { vfat: { available: true } }, repair: {}, format: ["exfat"] }
+const WAIT = "Another action is still running"
+
+function checking() {
+  const drives = service({ fsCapabilities: CHECKABLE })
+  drives.applySnapshot(twoSticks(MOUNTED))
+  assert.strictEqual(drives.checkVolume(drives.devices[0].volumes[0]), "ok")
+  assert.strictEqual(drives.longProcess.started.length, 1)
+  return drives
+}
+
+test("a check on one drive leaves every other drive usable", () => {
+  const drives = checking()
+  assert.strictEqual(drives.eject(drives.devices[1]), "ok")
+  assert.strictEqual(drives.actionProcess.started.length, 1)
+  assert.deepStrictEqual(drives.actionProcess.command.slice(4),
+    ["unmount", "/dev/sdc1", "power-off", "/dev/sdc"])
+})
+
+test("a check holds up the drive it is running on", () => {
+  const drives = checking()
+  const [device] = drives.devices
+  const [volume] = device.volumes
+  assert.strictEqual(drives.eject(device), WAIT)
+  assert.strictEqual(drives.ejectAll(), WAIT)
+  assert.strictEqual(drives.setVolumeLabel(volume, "NEW"), WAIT)
+  assert.strictEqual(drives.mountReadOnly(volume), WAIT)
+  drives.unmount(volume)
+  assert.deepStrictEqual(drives.actionProcess.started, [])
+})
+
+test("only one long action runs at a time, and none starts during another action", () => {
+  const drives = checking()
+  assert.strictEqual(drives.checkVolume(drives.devices[1].volumes[0]), WAIT)
+  drives.longProcess.running = false
+  drives.actionProcess.running = true
+  assert.strictEqual(drives.checkVolume(drives.devices[1].volumes[0]), WAIT)
+})
+
+test("each row knows whether it is the one being worked on", () => {
+  const drives = checking()
+  assert.strictEqual(drives.workingOn("/dev/sdb1"), true)
+  assert.strictEqual(drives.workingOn("/dev/sdc1"), false)
+  drives.unmount(drives.devices[1].volumes[0])
+  assert.strictEqual(drives.workingOn("/dev/sdb1"), true)
+  assert.strictEqual(drives.workingOn("/dev/sdc1"), true)
+  drives.longProcess.running = false
+  assert.strictEqual(drives.workingOn("/dev/sdb1"), false)
+})
+
+test("two actions finishing in turn each report their own result", () => {
+  const drives = checking()
+  drives.unmount(drives.devices[1].volumes[0])
+  drives.longProcess.output = "b false\n"
+  drives.actionProcess.errors = "Error.Failed: nope"
+
+  drives.actionProcess.running = false
+  drives.finishAction(drives.actionProcess, 1)
+  assert.strictEqual(drives.lastError, "nope")
+
+  drives.longProcess.running = false
+  drives.finishAction(drives.longProcess, 0)
+  assert.strictEqual(drives.checkedFsPath, "/dev/sdb1")
+  assert.strictEqual(drives.checkVerdict, false)
+  assert.strictEqual(drives.actionStatus, "Errors found on STICK")
+  assert.strictEqual(drives.lastError, "", "an older failure would hide the verdict")
+})
+
+test("a failed check does not cancel the window another drive is about to open", () => {
+  const drives = checking()
+  drives.unmount(drives.devices[1].volumes[0])
+  drives.actionProcess.running = false
+  drives.applySnapshot(twoSticks(MOUNTED).replace('"/run/media/x/OTHER"', "null"))
+  drives.mount(drives.devices[1].volumes[0], true)
+  drives.longProcess.running = false
+  drives.finishAction(drives.longProcess, 1)
+  assert.strictEqual(drives._openAfterPath, "/dev/sdc1")
+})
+
+test("a held eject of another drive does not wait for a long action", () => {
+  const drives = checking()
+  drives.pendingEjectPath = "/dev/sdc"
+  settle(drives)
+  assert.strictEqual(drives.actionProcess.started.length, 1)
+})
+
+test("the passphrase belongs to the action it was given to", () => {
+  const drives = service()
+  drives.applySnapshot(snapshot({}, { fstype: "crypto_LUKS" }))
+  assert.strictEqual(drives.unlock(drives.devices[0].volumes[0], "hunter2"), "ok")
+  assert.strictEqual(drives.actionProcess.secret, "hunter2")
+  assert.ok(!drives.actionProcess.command.join(" ").includes("hunter2"), "the passphrase is in argv")
+  drives.actionProcess.running = false
+  drives.runAction(["true"], "", "mount", "")
+  assert.strictEqual(drives.actionProcess.secret, "")
 })
 
 console.log(failures === 0 ? "\nAll service tests passed." : `\n${failures} service test(s) failed.`)
