@@ -543,7 +543,6 @@ Item {
   function toggleMount(volume, openAfter) {
     if (!volume) return
     if (volume.mounted) unmount(volume, false)
-    else if (volume.encrypted && !volume.unlocked) unlock(volume)
     else mount(volume, openAfter)
   }
 

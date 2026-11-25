@@ -147,7 +147,7 @@ Panel {
 
   function handleBarPress(buttonCode) {
     if (buttonCode === Qt.RightButton) {
-      drives.refresh()
+      drives.rescan()
     } else if (buttonCode === Qt.MiddleButton) {
       var mounted = Model.mountedVolumes(devices)
       if (mounted.length > 0) drives.openVolume(mounted[0])
@@ -224,6 +224,17 @@ Panel {
     if (volume.mounted) drives.openVolume(volume)
     else if (Model.canUnlock(volume)) beginUnlock(volume)
     else drives.mount(volume, openOnMount)
+  }
+
+  function pressVolume(volume, button) {
+    if (button === Qt.MiddleButton) drives.copyPath(volume)
+    else activateVolume(volume)
+  }
+
+  // A locked volume has no mount to toggle until it has been given a passphrase.
+  function toggleVolume(volume) {
+    if (Model.canUnlock(volume)) beginUnlock(volume)
+    else drives.toggleMount(volume, openOnMount)
   }
 
   function ejectCurrent() {
@@ -508,7 +519,7 @@ Panel {
         else if (text === "f" || text === "F") root.beginFormat(root.currentVolume())
         else if (text === "m" || text === "M") {
           if (root.currentRow && root.currentRow.kind === "portable") drives.togglePortable(root.currentPortable())
-          else drives.toggleMount(root.currentVolume(), root.openOnMount)
+          else root.toggleVolume(root.currentVolume())
         }
       }
 
@@ -1267,13 +1278,16 @@ Panel {
     MouseArea {
       anchors.fill: parent
       hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.MiddleButton
       cursorShape: volumeRow.actionable && !volumeRow.renamingLabel && !volumeRow.formatting
         ? Qt.PointingHandCursor : Qt.ArrowCursor
       onEntered: root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex))
       // A click anywhere on the row mounts or opens it, which is the wrong
       // answer for someone reaching past a half-typed name to their cursor —
       // and a mount is the one thing that would take a planned format away.
-      onClicked: if (!volumeRow.renamingLabel && !volumeRow.formatting) root.activateVolume(volumeRow.volume)
+      onClicked: function(mouse) {
+        if (!volumeRow.renamingLabel && !volumeRow.formatting) root.pressVolume(volumeRow.volume, mouse.button)
+      }
     }
 
     RowLayout {
@@ -1666,10 +1680,7 @@ Panel {
         enabled: !volumeRow.blocked
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex)) }
-        onClicked: {
-          if (Model.canUnlock(volumeRow.volume)) root.beginUnlock(volumeRow.volume)
-          else drives.toggleMount(volumeRow.volume, root.openOnMount)
-        }
+        onClicked: root.toggleVolume(volumeRow.volume)
       }
     }
   }

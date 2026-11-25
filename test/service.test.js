@@ -484,5 +484,46 @@ test("the passphrase belongs to the action it was given to", () => {
   assert.strictEqual(drives.actionProcess.secret, "")
 })
 
+console.log("\nwhat the README says a click or a key does")
+
+// The service the panel would be talking to, noting what it was asked for.
+function pressing(act) {
+  const asked = []
+  const drives = new Proxy({ devices: [], fsCapabilities: CAPS }, {
+    get: (target, name) => name in target ? target[name] : (...args) => { asked.push([name, ...args]) }
+  })
+  const view = load("Panel.qml", { drives, devices: [], rows: [], settings: {}, openOnMount: true })
+  act(view, view.Qt)
+  return { asked, view }
+}
+
+const volumeFrom = partOverrides => Model.parse(snapshot({}, partOverrides))[0].volumes[0]
+
+test("right-click on the bar icon rescans", () => {
+  assert.deepStrictEqual(pressing((view, Qt) => view.handleBarPress(Qt.RightButton)).asked, [["rescan"]])
+})
+
+test("middle-click on a volume copies its path, and a click still opens it", () => {
+  const volume = volumeFrom(MOUNTED)
+  assert.deepStrictEqual(pressing((view, Qt) => view.pressVolume(volume, Qt.MiddleButton)).asked,
+    [["copyPath", volume]])
+  assert.deepStrictEqual(pressing((view, Qt) => view.pressVolume(volume, Qt.LeftButton)).asked,
+    [["openVolume", volume]])
+  const row = read("Panel.qml").match(/component VolumeRow:[\s\S]*?MouseArea \{([\s\S]*?)\n    \}/)[1]
+  assert.match(row, /acceptedButtons: Qt\.LeftButton \| Qt\.MiddleButton/)
+  assert.match(row, /root\.pressVolume\(volumeRow\.volume, mouse\.button\)/)
+})
+
+test("m asks a locked volume for its passphrase, and toggles any other", () => {
+  const locked = volumeFrom({ fstype: "crypto_LUKS" })
+  const { asked, view } = pressing(view => view.toggleVolume(locked))
+  assert.deepStrictEqual(asked, [])
+  assert.strictEqual(view.unlockingPath, "/dev/sdb1")
+
+  const plain = volumeFrom({})
+  assert.deepStrictEqual(pressing(view => view.toggleVolume(plain)).asked, [["toggleMount", plain, true]])
+  assert.match(read("Panel.qml"), /text === "m"[\s\S]{0,250}root\.toggleVolume\(root\.currentVolume\(\)\)/)
+})
+
 console.log(failures === 0 ? "\nAll service tests passed." : `\n${failures} service test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)
