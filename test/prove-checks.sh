@@ -94,6 +94,10 @@ attempt "an eject that ignores a volume still mounted" \
   "sed -i 's|if \[ -n \"\$mounts\" \]; then|if false; then|' Service.qml" \
   shell
 
+attempt "a sleep list whose last line is never read" \
+  "sed -i 's|printf \"%s.*n\" \"\$1\" > \"\$2\"|printf %s \"\$1\" > \"\$2\"|' Service.qml" \
+  shell
+
 echo
 echo "caught $pass, missed $missed"
 [ "$missed" -eq 0 ] || exit 1

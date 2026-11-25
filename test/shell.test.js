@@ -354,6 +354,31 @@ check("eject does not treat an unreadable mount list as nothing mounted", () => 
   assert.deepStrictEqual(stub.calls(), [])
 }))
 
+// The list is written by the same script the plugin uses, because the bug this
+// guards against was in how the two halves fit together.
+function suspendWith(lab, targets) {
+  const list = path.join(lab, "state", "targets")
+  const written = runScript("writeFileScript", [targets.join("\n"), list])
+  assert.strictEqual(written.status, 0, written.stderr)
+  const stub = stubCommands(lab, {
+    gdbus: "echo '/org/freedesktop/login1: org.freedesktop.login1.Manager.PrepareForSleep (true,)'; exec sleep 1",
+    // Runs what the lock was protecting, then stops the guard.
+    "systemd-inhibit": 'while [[ $1 == --* ]]; do shift; done; "$@"; kill "$PPID"'
+  })
+  runScript("suspendScript", [list, path.join(lab, "guard"), "0", ""], stub.bin)
+  return stub.calls()
+}
+
+check("going to sleep unmounts every drive on the list, including the last", () => {
+  inLab(lab => assert.deepStrictEqual(suspendWith(lab, ["/dev/sdb1"]), ["unmount -b /dev/sdb1"]))
+  inLab(lab => assert.deepStrictEqual(suspendWith(lab, ["/dev/sdb1", "/dev/mapper/luks-x"]),
+    ["unmount -b /dev/sdb1", "unmount -b /dev/mapper/luks-x"]))
+})
+
+check("going to sleep with nothing mounted unmounts nothing", () => inLab(lab => {
+  assert.deepStrictEqual(suspendWith(lab, []), [])
+}))
+
 console.log("")
 if (failures > 0) {
   console.log(failures === 1 ? "1 check failed." : failures + " checks failed.")

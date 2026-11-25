@@ -658,7 +658,9 @@ Item {
   readonly property string suspendTargetsPath:
     Quickshell.env("HOME") + "/.local/state/omarchy/removable-drives-suspend"
 
-  property string _suspendSignature: ""
+  // null rather than "", so the list left by the last session is replaced even
+  // when nothing is mounted yet.
+  property var _suspendSignature: null
 
   // The guard is a shell loop rather than QML because the unmounting has to
   // finish while the lock is still held; a Process started from here would
@@ -752,6 +754,11 @@ Item {
     'done'
   ].join("\n")
 
+  // The trailing newline is required: the sleep guard reads line by line, and
+  // `read` drops a last line that does not end in one.
+  readonly property string writeFileScript:
+    'mkdir -p "$(dirname "$2")" && printf "%s\\n" "$1" > "$2"'
+
   // Rewritten only when the mounted set changes, so a drive appearing or going
   // quiet does not cost a write.
   function updateSuspendTargets() {
@@ -759,8 +766,7 @@ Item {
     var text = Model.suspendTargets(devices).join("\n")
     if (text === _suspendSignature) return
     _suspendSignature = text
-    suspendWriter.command = ["bash", "-c",
-                             'mkdir -p "$(dirname "$2")" && printf %s "$1" > "$2"',
+    suspendWriter.command = ["bash", "-c", writeFileScript,
                              "removable-drives", text, suspendTargetsPath]
     suspendWriter.running = true
   }
@@ -773,8 +779,7 @@ Item {
     if (!device) return
     var next = Model.withDriveSetting(store, device, name, value)
     store = next
-    storeWriter.command = ["bash", "-c",
-                           'mkdir -p "$(dirname "$2")" && printf %s "$1" > "$2"',
+    storeWriter.command = ["bash", "-c", writeFileScript,
                            "removable-drives", JSON.stringify(next), storePath]
     storeWriter.running = true
     // Re-apply immediately so the panel renames without waiting for lsblk.
