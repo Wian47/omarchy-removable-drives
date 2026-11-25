@@ -86,6 +86,10 @@ attempt "a line map that points at the wrong source line" \
   "sed -i 's|lineOf(element.start)|lineOf(element.end)|' test/shell.test.js" \
   shell
 
+attempt "a trash folder emptied without checking for a symlink" \
+  "sed -i 's|if \[ .*realpath -m -- .*!= .*then|if false; then|' Service.qml" \
+  shell
+
 echo
 echo "caught $pass, missed $missed"
 [ "$missed" -eq 0 ] || exit 1

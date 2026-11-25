@@ -1,5 +1,5 @@
-// Lints the shell that Service.qml keeps in string arrays. Run with:
-// node test/shell.test.js
+// Lints the shell that Service.qml keeps in string arrays, and runs the scripts
+// that can lose data. Run with: node test/shell.test.js
 //
 // Model.js decides whether a format may run; formatScript is what erases the
 // drive. That half was the largest unchecked surface in the plugin: shellcheck
@@ -14,7 +14,8 @@
 const fs = require("fs")
 const os = require("os")
 const path = require("path")
-const { execFileSync } = require("child_process")
+const assert = require("assert")
+const { execFileSync, spawnSync } = require("child_process")
 
 const root = path.join(__dirname, "..")
 const serviceSource = fs.readFileSync(path.join(root, "Service.qml"), "utf8")
@@ -233,6 +234,57 @@ check("the embedded shell passes shellcheck", () => {
     fs.rmSync(lab, { recursive: true, force: true })
   }
 })
+
+// Resolved, because a temporary directory behind a symlink would look like the
+// very thing the trash check refuses.
+function inLab(fn) {
+  const lab = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "removable-drives-run-")))
+  try {
+    return fn(lab)
+  } finally {
+    fs.rmSync(lab, { recursive: true, force: true })
+  }
+}
+
+function runScript(name, args) {
+  const script = scripts.find(candidate => candidate.name === name)
+  if (!script) throw new Error(name + " is not in Service.qml")
+  return spawnSync("bash", ["-c", script.shell, "removable-drives", ...args],
+                   { encoding: "utf8", timeout: 10000 })
+}
+
+check("a trash folder reached through a symlink is neither counted nor emptied", () => inLab(lab => {
+  const outside = path.join(lab, "outside", "1000")
+  const stick = path.join(lab, "stick")
+  fs.mkdirSync(outside, { recursive: true })
+  fs.mkdirSync(stick)
+  fs.writeFileSync(path.join(outside, "keep"), "not on the drive")
+  fs.symlinkSync(path.join(lab, "outside"), path.join(stick, ".Trash"))
+  fs.symlinkSync(outside, path.join(stick, ".Trash-1000"))
+
+  for (const link of [path.join(stick, ".Trash", "1000"), path.join(stick, ".Trash-1000")]) {
+    assert.strictEqual(runScript("trashProbeScript", [link]).stdout, "", link + " was counted")
+    assert.notStrictEqual(runScript("trashEmptyScript", [link]).status, 0, link + " was accepted")
+  }
+  assert.ok(fs.existsSync(path.join(outside, "keep")), "a file outside the drive was deleted")
+}))
+
+check("a real trash folder is counted and emptied, whatever the drive is called", () => inLab(lab => {
+  const trash = path.join(lab, "MY  STICK's", ".Trash-1000")
+  fs.mkdirSync(path.join(trash, "files"), { recursive: true })
+  fs.writeFileSync(path.join(trash, "files", "old"), "deleted")
+
+  const missing = path.join(lab, "MY  STICK's", ".Trash", "1000")
+  const sizes = runScript("trashProbeScript", [missing, trash]).stdout
+  assert.match(sizes, /^[0-9]+\t/)
+  assert.ok(sizes.endsWith("\t" + trash + "\n"), "unexpected probe output " + JSON.stringify(sizes))
+
+  const emptied = runScript("trashEmptyScript", [trash])
+  assert.strictEqual(emptied.status, 0, emptied.stderr)
+  assert.ok(!fs.existsSync(trash), "the trash is still there")
+  assert.strictEqual(runScript("trashEmptyScript", [trash]).status, 0,
+    "a trash that is already gone is not an error")
+}))
 
 console.log("")
 if (failures > 0) {

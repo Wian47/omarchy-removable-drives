@@ -308,12 +308,13 @@ RAM-backed runtime directory and a trap removes it however the unlock ends.
 
 Emptying a drive's trash is the only recursive delete here, so the path is
 re-derived from the live mount list and must exactly match a `.Trash-<uid>`
-candidate of a mounted removable volume. The tests assert it refuses `/`,
-`$HOME`, the mount root, and drives it is not tracking.
+candidate of a mounted removable volume, and must not pass through a symlink.
+The tests assert it refuses `/`, `$HOME`, the mount root, a symlinked trash
+folder, and drives it is not tracking.
 
 ```bash
 node test/model.test.js       # 237 tests, no compositor required
-node test/shell.test.js       # shellcheck over the shell inside Service.qml
+node test/shell.test.js       # lints and runs the shell inside Service.qml
 omarchy plugin validate .     # the same check the shell applies
 ```
 

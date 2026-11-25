@@ -955,6 +955,25 @@ Item {
 
   // -------------------------------------------------------------- trash
 
+  // A filesystem that supports symlinks can point .Trash at any directory, and
+  // neither du nor rm stops at a link in the middle of a path. Anything that
+  // does not resolve to itself is not this drive's trash.
+  readonly property string trashProbeScript: [
+    'for path; do',
+    '  [ "$(realpath -e -- "$path" 2>/dev/null)" = "$path" ] || continue',
+    '  du -sb -- "$path"',
+    'done'
+  ].join("\n")
+
+  readonly property string trashEmptyScript: [
+    // -m, so a trash emptied elsewhere in the meantime is not called a symlink.
+    'if [ "$(realpath -m -- "$1" 2>/dev/null)" != "$1" ]; then',
+    '  echo "Refusing to empty a trash folder that is a symlink" >&2',
+    '  exit 1',
+    'fi',
+    'rm -rf -- "$1"'
+  ].join("\n")
+
   function mountedMountpoints() {
     var out = []
     for (var d = 0; d < devices.length; d++) {
@@ -972,7 +991,7 @@ Item {
       trashSizes = ({})
       return
     }
-    var command = ["du", "-sb", "--"]
+    var command = ["bash", "-c", trashProbeScript, "removable-drives"]
     for (var i = 0; i < mounts.length; i++) {
       var candidates = Model.trashCandidates(mounts[i], uid)
       for (var c = 0; c < candidates.length; c++) command.push(candidates[c])
@@ -1009,8 +1028,8 @@ Item {
       lastError = "Refusing to empty an unrecognised trash path"
       return
     }
-    runAction(["rm", "-rf", "--", path], volume.fsPath, "trash",
-              "Emptied trash on " + volume.title)
+    runAction(["bash", "-c", trashEmptyScript, "removable-drives", path],
+              volume.fsPath, "trash", "Emptied trash on " + volume.title)
   }
 
   // ------------------------------------------- labels and integrity
@@ -1715,8 +1734,7 @@ Item {
 
   Process {
     id: trashProcess
-    // Most candidates do not exist; du complains about those on stderr and
-    // still reports the ones that do, so a non-zero exit is expected here.
+    // Most candidates do not exist, so a non-zero exit is expected here.
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.trashSizes = Model.parseSizes(text)

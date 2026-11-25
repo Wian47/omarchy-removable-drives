@@ -112,12 +112,13 @@ jobs:
           export PATH=/usr/lib/qt6/bin:$PATH
           node test/wiring.test.js
 
-      # Service.qml keeps eight shell scripts in string arrays, and shellcheck
+      # Service.qml keeps its shell scripts in string arrays, and shellcheck
       # cannot open a QML property. So the scripts are pulled back out of the
       # source and linted as the shell they become. Model.js decides whether a
       # format may run and is covered by 237 tests. formatScript is what erases
       # the drive, and until this step existed nothing but a person had read it.
-      - name: The shell inside Service.qml passes shellcheck
+      # The scripts that can lose data are also run, against stubbed commands.
+      - name: The shell inside Service.qml passes shellcheck and does its job
         run: node test/shell.test.js
 
       # A check nobody has watched fail is a check nobody knows works. This
