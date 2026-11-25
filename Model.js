@@ -328,6 +328,13 @@ function unescapeMountPath(value) {
     })
 }
 
+// Lines of `findmnt --poll`, as "mount /dev/sdb1 /run/media/…". Only a block
+// device can be one of these drives; the rest is containers and tmpfs, which
+// come and go constantly on some machines.
+function isDriveMountEvent(line) {
+  return /^\S+ \/dev\//.test(String(line || ""))
+}
+
 function parseMountFlags(raw) {
   var flags = {}
   var lines = String(raw || "").split("\n")

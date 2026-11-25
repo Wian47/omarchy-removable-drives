@@ -196,6 +196,17 @@ check("no device path reaches a shell command unquoted", () => {
   return problems
 })
 
+// udev does not report a mount, so a drive mounted by anything else stays
+// unmounted in the panel until a timer notices.
+check("the service follows mounts as well as devices", () => {
+  const monitors = [...serviceSource.matchAll(/^  Process \{\n    id: (\w+)\n[\s\S]*?^  \}/gm)]
+    .filter(([block]) => /running: true/.test(block) && /debounce\.restart\(\)/.test(block))
+    .map(([block]) => block)
+  return ["udevadm", "findmnt"]
+    .filter(tool => !monitors.some(block => block.includes('"' + tool + '"') && /onExited: monitorRestart/.test(block)))
+    .map(tool => `nothing in Service.qml rescans on what ${tool} reports, and restarts it when it dies`)
+})
+
 // A verb the README promises and the handler never grew fails only for the
 // person who copied the line out of the README.
 const IPC_INTERNAL = new Set(["open", "close", "show", "hide", "toggle"])

@@ -1549,6 +1549,16 @@ test("a later mount on the same point shadows the earlier one", () => {
   assert.strictEqual(flags["/mnt"].readOnly, true, "the top of the stack is what you are looking at")
 })
 
+test("a drive being mounted or unmounted is worth a rescan, a container is not", () => {
+  // Captured from `findmnt --poll -rno ACTION,SOURCE`.
+  for (const line of ["mount /dev/sdb1", "umount /dev/sdb1", "remount /dev/mapper/luks-x", "mount /dev/mapper/root[/@/usr]"]) {
+    assert.strictEqual(api.isDriveMountEvent(line), true, line)
+  }
+  for (const line of ["mount tmpfs", "umount overlay", "mount nsfs[net:[4026532000]]", "", null]) {
+    assert.strictEqual(api.isDriveMountEvent(line), false, String(line))
+  }
+})
+
 test("a volume is only read-only when it is actually mounted", () => {
   const mounted = { mounted: true, mountpoint: "/run/media/wian47/MY RESCUE" }
   const unmounted = { mounted: false, mountpoint: "" }

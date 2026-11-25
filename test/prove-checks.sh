@@ -43,6 +43,9 @@ attempt "a panel binding to a service property that does not exist" \
 attempt "a device path concatenated into a command instead of quoted" \
   "sed -i 's|command + \" \" + quote(volume.mountpoint)|command + \" \" + volume.mountpoint|' Service.qml"
 
+attempt "a mount nobody is told about" \
+  "sed -i 's|if (Model.isDriveMountEvent(line)) debounce.restart()|Model.isDriveMountEvent(line)|' Service.qml"
+
 attempt "a scripting verb the README promises but nothing handles" \
   "sed -i 's|omarchy-shell removable-drives toggle|omarchy-shell removable-drives defragment|' README.md"
 

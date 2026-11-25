@@ -67,8 +67,8 @@ omarchy plugin add https://github.com/Wian47/omarchy-removable-drives.git --enab
 ```
 
 Needs Omarchy 4 (Quattro) and `udisks2`, both standard. It calls `lsblk`,
-`udevadm`, `udisksctl`, `busctl`, `gio`, `fuser`, `du`, `wl-copy` and Omarchy's
-own `omarchy-*` helpers. Nothing runs as root.
+`udevadm`, `findmnt`, `udisksctl`, `busctl`, `gio`, `fuser`, `du`, `wl-copy` and
+Omarchy's own `omarchy-*` helpers. Nothing runs as root.
 
 To remove it:
 
@@ -318,7 +318,7 @@ The tests assert it refuses `/`, `$HOME`, the mount root, a symlinked trash
 folder, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 242 tests, no compositor required
+node test/model.test.js       # 243 tests, no compositor required
 node test/shell.test.js       # lints and runs the shell inside Service.qml
 node test/service.test.js     # runs the functions inside Service.qml
 omarchy plugin validate .     # the same check the shell applies

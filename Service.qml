@@ -1863,6 +1863,20 @@ Item {
     onExited: monitorRestart.restart()
   }
 
+  // udev says nothing when a filesystem is mounted or unmounted, and most of
+  // that is done by something else: an automounter, a file manager, a terminal.
+  Process {
+    id: mountMonitor
+    command: ["stdbuf", "-oL", "findmnt", "--poll", "-rno", "ACTION,SOURCE"]
+    running: true
+    stdout: SplitParser {
+      onRead: function(line) {
+        if (Model.isDriveMountEvent(line)) debounce.restart()
+      }
+    }
+    onExited: monitorRestart.restart()
+  }
+
   // A burst of udev lines arrives for every partition on a stick; settle
   // before asking lsblk, so plugging in a 4-partition drive costs one call.
   Timer {
@@ -1886,7 +1900,10 @@ Item {
   Timer {
     id: monitorRestart
     interval: 3000
-    onTriggered: if (!monitorProcess.running) monitorProcess.running = true
+    onTriggered: {
+      monitorProcess.running = true
+      mountMonitor.running = true
+    }
   }
 
   // I/O counters are only sampled while something removable is attached, so
@@ -1915,8 +1932,8 @@ Item {
     }
   }
 
-  // Backstop for a machine where udevadm is unavailable or its stream dies
-  // quietly: never more than a minute stale.
+  // Backstop for a machine where either monitor is unavailable or its stream
+  // dies quietly: never more than a minute stale.
   Timer {
     interval: 60000
     running: true
