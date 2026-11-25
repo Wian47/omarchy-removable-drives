@@ -223,5 +223,79 @@ test("a drive attached before the shell started does not run its hook", () => {
   assert.deepStrictEqual(hooksRun(drives), [])
 })
 
+console.log("\nejecting")
+
+const BUSY = { sdb: { busy: true, writeRate: 1, inFlight: 1 } }
+
+// Two quiet samples, which is what a held eject waits for.
+function settle(drives) {
+  drives.activity = {}
+  drives.advancePendingEject()
+  drives.advancePendingEject()
+}
+
+function holdEject() {
+  const drives = service()
+  drives.applySnapshot(snapshot({}, MOUNTED))
+  drives.activity = BUSY
+  drives.eject(drives.devices[0])
+  assert.strictEqual(drives.pendingEjectPath, "/dev/sdb")
+  return drives
+}
+
+test("a held eject runs once the drive goes quiet", () => {
+  const drives = holdEject()
+  drives.advancePendingEject()
+  assert.deepStrictEqual(drives.actionProcess.started, [])
+  settle(drives)
+  assert.strictEqual(drives.actionProcess.started.length, 1)
+})
+
+test("a held eject does not outlive its drive", () => {
+  for (const pending of ["/dev/sdb", "*"]) {
+    const drives = holdEject()
+    drives.pendingEjectPath = pending
+    drives.applySnapshot(NOTHING)
+    assert.strictEqual(drives.pendingEjectPath, "", pending)
+    drives.applySnapshot(snapshot({ serial: "S2" }, MOUNTED))
+    settle(drives)
+    assert.deepStrictEqual(drives.actionProcess.started, [], "the next drive was ejected")
+  }
+})
+
+test("a held eject waits for another action rather than being dropped", () => {
+  const drives = holdEject()
+  drives.actionProcess.running = true
+  settle(drives)
+  assert.strictEqual(drives.pendingEjectPath, "/dev/sdb")
+  drives.actionProcess.running = false
+  settle(drives)
+  assert.strictEqual(drives.actionProcess.started.length, 2, "the eject never ran")
+})
+
+const warnings = drives => drives.detached.filter(command => command.includes("Removed while still mounted")).length
+
+test("a drive whose eject failed still warns when it is pulled", () => {
+  const drives = service()
+  drives.applySnapshot(snapshot({}, MOUNTED))
+  drives.eject(drives.devices[0])
+  drives.actionProcess.running = false
+  drives.actionProcess.onExited(1)
+  drives.applySnapshot(snapshot({}, MOUNTED))
+  drives.applySnapshot(NOTHING)
+  assert.strictEqual(warnings(drives), 1)
+})
+
+test("a drive that was ejected goes without a warning, even seen mounted on the way", () => {
+  const drives = service()
+  drives.applySnapshot(snapshot({}, MOUNTED))
+  drives.eject(drives.devices[0])
+  drives.applySnapshot(snapshot({}, MOUNTED))
+  drives.actionProcess.running = false
+  drives.actionProcess.onExited(0)
+  drives.applySnapshot(NOTHING)
+  assert.strictEqual(warnings(drives), 0)
+})
+
 console.log(failures === 0 ? "\nAll service tests passed." : `\n${failures} service test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

@@ -266,6 +266,7 @@ Item {
     if (_seenFirstSnapshot) announceChanges(diff)
     _seenFirstSnapshot = true
     runWaitingHooks()
+    forgetStaleEjects()
 
     if (watchClosely) probeTrash()
     probeCapabilities()
@@ -356,15 +357,9 @@ Item {
   // two consecutive samples. One quiet sample is not enough: a copy in
   // progress dips to zero between bursts.
   function advancePendingEject() {
-    if (pendingEjectPath === "") return
+    if (pendingEjectPath === "" || busy) return
 
     var targets = pendingEjectTargets()
-    if (targets.length === 0) {
-      pendingEjectPath = ""
-      _quietTicks = 0
-      return
-    }
-
     var stillBusy = false
     for (var i = 0; i < targets.length; i++) {
       if (isDeviceBusy(targets[i])) stillBusy = true
@@ -384,6 +379,17 @@ Item {
     if (pendingEjectPath === "*") return devices
     var device = deviceByPath(pendingEjectPath)
     return device ? [device] : []
+  }
+
+  // What was asked about one drive must not be applied to the next one to land
+  // on the same path. A held eject goes with its drive, and a drive that is
+  // mounted again is not one that is expected to disappear.
+  function forgetStaleEjects() {
+    if (pendingEjectPath !== "" && pendingEjectTargets().length === 0) cancelPendingEject()
+    if (busyAction === "eject") return
+    for (var i = 0; i < devices.length; i++) {
+      if (devices[i].mountedCount > 0) delete _expectedRemovals[devices[i].path]
+    }
   }
 
   function cancelPendingEject() {
