@@ -217,7 +217,9 @@ mounts every volume on the drive read-only, which is what an archive disk you
 never want written to wants. The panel writes both from the drive row, and
 reads them strictly on the way back in: a `readOnly` that is neither `true` nor
 `false` is taken as `true`, because a typo in this file must not be the reason
-an archive drive came up writable.
+an archive drive came up writable. If the file stops being valid JSON, the
+panel says so, keeps the settings it last read, and saves nothing over it. With
+none read yet, it mounts read-only until the file is fixed.
 
 ## Scripting
 
@@ -314,8 +316,9 @@ The tests assert it refuses `/`, `$HOME`, the mount root, a symlinked trash
 folder, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 237 tests, no compositor required
+node test/model.test.js       # 239 tests, no compositor required
 node test/shell.test.js       # lints and runs the shell inside Service.qml
+node test/service.test.js     # runs the functions inside Service.qml
 omarchy plugin validate .     # the same check the shell applies
 ```
 

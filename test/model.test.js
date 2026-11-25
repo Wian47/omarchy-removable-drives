@@ -484,11 +484,18 @@ test("keeps a drive's other settings when one of them changes", () => {
   assert.strictEqual(store.drives["serial:ABC123"].nickname, "Backup")
 })
 
-test("a corrupt or missing state file reads as empty, not as a crash", () => {
+test("a missing or empty state file is no settings", () => {
   assert.deepStrictEqual(api.parseStore("").drives, {})
-  assert.deepStrictEqual(api.parseStore("{ not json").drives, {})
-  assert.deepStrictEqual(api.parseStore("null").drives, {})
+  assert.deepStrictEqual(api.parseStore(" \n").drives, {})
+  assert.deepStrictEqual(api.parseStore('{"version":1}').drives, {})
   assert.deepStrictEqual(api.parseStore('{"drives":{"serial:A":{"nickname":"X"}}}').drives, { "serial:A": { nickname: "X" } })
+})
+
+test("a state file that cannot be read is not taken for one with no settings", () => {
+  for (const raw of ["{ not json", '{"drives":{"serial:A":{"readOnly":true},}}', "null", "[]", "7",
+                     '{"drives":[]}', '{"drives":"none"}', '{"drives":null}']) {
+    assert.strictEqual(api.parseStore(raw), null, raw)
+  }
 })
 
 console.log("\nper-drive mount policy")
@@ -526,8 +533,11 @@ test("an autoOpen nobody can read falls back to the global setting rather than g
 test("a drive mounts writable unless it was asked not to", () => {
   assert.strictEqual(api.shouldMountReadOnly(saved({}), POLICY_DRIVE), false)
   assert.strictEqual(api.shouldMountReadOnly(saved({ readOnly: false }), POLICY_DRIVE), false)
-  assert.strictEqual(api.shouldMountReadOnly(null, POLICY_DRIVE), false)
   assert.strictEqual(api.shouldMountReadOnly(saved({ readOnly: true }), null), false)
+})
+
+test("a drive mounts read-only while nobody can read what was saved for it", () => {
+  assert.strictEqual(api.shouldMountReadOnly(null, POLICY_DRIVE), true)
 })
 
 test("a drive marked read-only mounts read-only", () => {

@@ -734,7 +734,10 @@ function autoOpenPolicy(value) {
   return null
 }
 
+// A store of null is a settings file that cannot be read. Which drives it marks
+// read-only is unknown, so none of them is mounted writable on a guess.
 function shouldMountReadOnly(store, device) {
+  if (store === null) return true
   return readOnlyPolicy(driveSettings(store, device).readOnly)
 }
 
@@ -787,7 +790,7 @@ function withDriveSetting(store, device, name, value) {
 // user — but the two that decide how the drive mounts are read through their
 // own policy rather than believed, so a typo cannot reach a mount command.
 function driveRecord(entry) {
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null
+  if (!isRecord(entry)) return null
   var out = {}
   for (var name in entry) {
     if (name !== "readOnly" && name !== "autoOpen") out[name] = entry[name]
@@ -800,22 +803,30 @@ function driveRecord(entry) {
   return out
 }
 
+function isRecord(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+var STORE_UNREADABLE = "The saved drive settings are not valid JSON, so nothing is saved until that is fixed"
+
+// null when the file is not settings at all, which is not the same as having
+// none: an empty answer would be written back over whatever the file holds.
 function parseStore(raw) {
+  var parsed
   try {
-    var parsed = JSON.parse(String(raw || "").replace(/^\s+|\s+$/g, "") || "{}")
-    if (!parsed || typeof parsed !== "object") return { version: 1, drives: {} }
-    var saved = parsed.drives
-    var drives = {}
-    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
-      for (var key in saved) {
-        var record = driveRecord(saved[key])
-        if (record !== null && Object.keys(record).length > 0) drives[key] = record
-      }
-    }
-    return { version: 1, drives: drives }
+    parsed = JSON.parse(String(raw || "").replace(/^\s+|\s+$/g, "") || "{}")
   } catch (e) {
-    return { version: 1, drives: {} }
+    return null
   }
+  if (!isRecord(parsed)) return null
+  var saved = parsed.drives === undefined ? {} : parsed.drives
+  if (!isRecord(saved)) return null
+  var drives = {}
+  for (var key in saved) {
+    var record = driveRecord(saved[key])
+    if (record !== null && Object.keys(record).length > 0) drives[key] = record
+  }
+  return { version: 1, drives: drives }
 }
 
 // --------------------------------------------------------- connect hooks

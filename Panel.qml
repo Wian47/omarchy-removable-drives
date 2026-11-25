@@ -337,8 +337,7 @@ Panel {
     function rename(path: string, nickname: string): string {
       for (var i = 0; i < drives.devices.length; i++) {
         if (drives.devices[i].path === path) {
-          drives.setNickname(drives.devices[i], nickname)
-          return "ok"
+          return drives.setNickname(drives.devices[i], nickname)
         }
       }
       return "unknown device: " + path

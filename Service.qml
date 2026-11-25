@@ -67,7 +67,11 @@ Item {
   readonly property var supportHint: Model.supportHint(support)
 
   // Per-drive settings the user has saved, keyed so they survive replugging.
+  // Keeps the last good copy while the file is unreadable, and is null when
+  // there has not been one.
   property var store: ({ version: 1, drives: {} })
+  property bool storeUnreadable: false
+  property bool _storeLoaded: false
 
   // Mount options per mount point, straight from /proc/mounts — the kernel's
   // own answer to "is this mounted read-only?", which the lsblk tree does not
@@ -775,21 +779,34 @@ Item {
 
   readonly property string storePath: Quickshell.env("HOME") + "/.local/state/omarchy/removable-drives.json"
 
+  function loadStore(raw) {
+    var parsed = Model.parseStore(raw)
+    storeUnreadable = parsed === null
+    if (storeUnreadable) {
+      if (!_storeLoaded) store = null
+      lastError = Model.STORE_UNREADABLE
+      return
+    }
+    _storeLoaded = true
+    store = parsed
+    if (lastError === Model.STORE_UNREADABLE) lastError = ""
+  }
+
   function saveDriveSetting(device, name, value) {
-    if (!device) return
+    if (!device) return "unknown device"
+    if (storeUnreadable) return refuse(Model.STORE_UNREADABLE)
     var next = Model.withDriveSetting(store, device, name, value)
     store = next
-    storeWriter.command = ["bash", "-c", writeFileScript,
-                           "removable-drives", JSON.stringify(next), storePath]
-    storeWriter.running = true
+    storeFile.setText(JSON.stringify(next) + "\n")
     // Re-apply immediately so the panel renames without waiting for lsblk.
     var applied = devices.slice()
     Model.applyStore(applied, next)
     devices = applied
+    return "ok"
   }
 
   function setNickname(device, nickname) {
-    saveDriveSetting(device, "nickname", String(nickname || "").replace(/^\s+|\s+$/g, ""))
+    return saveDriveSetting(device, "nickname", String(nickname || "").replace(/^\s+|\s+$/g, ""))
   }
 
   // Both save null rather than false for the off position, so turning a
@@ -1782,10 +1799,6 @@ Item {
   }
 
   Process {
-    id: storeWriter
-  }
-
-  Process {
     id: uidProcess
     command: ["id", "-u"]
     running: true
@@ -1802,9 +1815,12 @@ Item {
     path: root.storePath
     watchChanges: true
     printErrors: false
-    onLoaded: root.store = Model.parseStore(text())
+    onLoaded: root.loadStore(text())
     onFileChanged: reload()
-    onLoadFailed: root.store = ({ version: 1, drives: {} })
+    onLoadFailed: function(error) {
+      root.loadStore(error === FileViewError.FileNotFound ? "" : "unreadable")
+    }
+    onSaveFailed: root.lastError = "Could not save " + root.storePath
   }
 
   // udev tells us the moment a device appears or disappears, which is the

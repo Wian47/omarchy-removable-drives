@@ -115,11 +115,16 @@ jobs:
       # Service.qml keeps its shell scripts in string arrays, and shellcheck
       # cannot open a QML property. So the scripts are pulled back out of the
       # source and linted as the shell they become. Model.js decides whether a
-      # format may run and is covered by 237 tests. formatScript is what erases
+      # format may run and has its own tests. formatScript is what erases
       # the drive, and until this step existed nothing but a person had read it.
       # The scripts that can lose data are also run, against stubbed commands.
       - name: The shell inside Service.qml passes shellcheck and does its job
         run: node test/shell.test.js
+
+      # Service.qml decides when to mount, eject and save. Its functions are plain
+      # JavaScript, so they run here against stand-ins for the QML around them.
+      - name: The functions inside the QML do what they say
+        run: node test/service.test.js
 
       # A check nobody has watched fail is a check nobody knows works. This
       # breaks each invariant in a scratch copy and expects the check to catch it.
