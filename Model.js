@@ -33,8 +33,6 @@ var GLYPH_PHONE = codepoint(0xF011C)     // md-cellphone
 var GLYPH_CAMERA = codepoint(0xF0100)    // md-camera
 var GLYPH_TRASH = codepoint(0xF0A7A)     // md-trash_can_outline
 var GLYPH_PENCIL = codepoint(0xF03EB)    // md-pencil
-var GLYPH_TERMINAL = codepoint(0xF018D)  // md-console
-var GLYPH_COPY = codepoint(0xF018F)      // md-content_copy
 var GLYPH_TAG = codepoint(0xF04F9)       // md-tag
 var GLYPH_STETHOSCOPE = codepoint(0xF04D9) // md-stethoscope
 var GLYPH_WRENCH = codepoint(0xF05B7)    // md-wrench
@@ -666,23 +664,6 @@ function parseSizes(raw) {
 }
 
 // ------------------------------------------------------------- unlocking
-
-// udisksctl answers an unlock with "Unlocked /dev/sdb1 as /dev/dm-0." and the
-// cleartext device is the half that matters: udisks refuses the backing
-// partition for mount and unmount alike — "is not a mountable filesystem" —
-// so every filesystem operation after an unlock has to name the mapper.
-//
-// The trailing period is part of the sentence, not the path, and a mapper name
-// can itself contain one, so it is stripped from the end rather than used as a
-// delimiter.
-function parseUnlockedMapper(raw) {
-  var lines = String(raw === undefined || raw === null ? "" : raw).split("\n")
-  for (var i = 0; i < lines.length; i++) {
-    var match = lines[i].match(/\bas\s+(\/dev\/.+?)\.?\s*$/)
-    if (match) return match[1]
-  }
-  return ""
-}
 
 function canUnlock(volume) {
   return !!(volume && volume.encrypted && !volume.unlocked)

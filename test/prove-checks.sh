@@ -37,6 +37,9 @@ attempt "a QML file that no longer parses" \
 attempt "a call to a Model function that does not exist" \
   "sed -i 's/Model\.formatBytes(/Model.formatBytesRenamed(/' Panel.qml"
 
+attempt "a Model function that only its tests still use" \
+  "printf '\nfunction formerlyUseful() { return 1 }\n' >> Model.js"
+
 attempt "a panel binding to a service property that does not exist" \
   "sed -i '0,/drives\.devices/s//drives.deviceList/' Panel.qml"
 

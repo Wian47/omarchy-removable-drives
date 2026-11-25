@@ -135,6 +135,15 @@ check("every Model function the QML calls exists", () => {
       .map(([called, line]) => `${name}:${line}: Model.${called} is not declared in Model.js`))
 })
 
+check("everything Model.js declares is used by something other than its tests", () => {
+  const code = modelSource.split("\n").map(stripComment).join("\n")
+  const qml = serviceSource + panelSource
+  return [...declaredIn(modelSource)].filter(name => {
+    const mentions = code.match(new RegExp("(?<![\\w$])" + name.replace(/\$/g, "\\$") + "(?![\\w$])", "g")).length
+    return mentions < 2 && !new RegExp("\\bModel\\." + name + "\\b").test(qml)
+  }).map(name => `Model.js declares ${name}, and nothing uses it`)
+})
+
 // Panel.qml reaches the service through `drives`. A property renamed in
 // Service.qml leaves an undefined binding here rather than an error.
 check("every service member the panel binds to exists", () => {

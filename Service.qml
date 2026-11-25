@@ -561,9 +561,11 @@ Item {
   // runs, and a passphrase in argv is a passphrase in `ps`.
   //
   // udisks refuses the backing partition for mount and unmount alike, so the
-  // mount that follows targets the mapper udisksctl names on its way out —
-  // and honours the drive's own read-only setting, because the container is
-  // the third way a filesystem on it can come up.
+  // mount that follows targets the mapper udisksctl names on its way out, in
+  // "Unlocked /dev/sdb1 as /dev/dm-0." The period ends the sentence and can also
+  // be in the name, so one is dropped from the end. The mount honours the drive's
+  // own read-only setting, because the container is the third way a filesystem on
+  // it can come up.
   readonly property string unlockScript: [
     'set -u',
     'dev=$1',

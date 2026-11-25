@@ -246,12 +246,12 @@ function inLab(fn) {
   }
 }
 
-function runScript(name, args, bin) {
+function runScript(name, args, bin, options) {
   const script = scripts.find(candidate => candidate.name === name)
   if (!script) throw new Error(name + " is not in Service.qml")
   const env = bin ? { ...process.env, PATH: bin + path.delimiter + process.env.PATH } : process.env
   return spawnSync("bash", ["-c", script.shell, "removable-drives", ...args],
-                   { encoding: "utf8", timeout: 10000, env })
+                   { encoding: "utf8", timeout: 10000, env, ...options })
 }
 
 // Replaces commands with one-line stand-ins, so nothing reaches a real drive.
@@ -481,6 +481,36 @@ check("a format passes the label as one value and zeroes only when asked", () =>
     fstype: "ext4",
     options: "take-ownership b true update-partition-type b true label s MY  'STICK' $(id) erase s zero"
   }))
+})
+
+// Answers the unlock with the given sentence, and keeps what was in the key file.
+function unlockWith(lab, answer, readOnly) {
+  const stub = stubCommands(lab, {
+    udisksctl: `if [ "$1" = unlock ]; then cat "\${@: -1}" > '${path.join(lab, "key")}'; echo '${answer}'; fi`
+  })
+  const result = runScript("unlockScript", ["/dev/sdb1", readOnly], stub.bin, {
+    input: "a pass  phrase\n",
+    env: { ...process.env, PATH: stub.bin + path.delimiter + process.env.PATH, XDG_RUNTIME_DIR: lab }
+  })
+  const left = fs.readdirSync(lab).filter(name => name.endsWith(".key"))
+  assert.deepStrictEqual(left, [], "the key file was left behind")
+  assert.strictEqual(fs.readFileSync(path.join(lab, "key"), "utf8"), "a pass  phrase")
+  return { status: result.status, mounts: stub.calls().filter(call => call.startsWith("mount")) }
+}
+
+check("an unlock mounts the device udisksctl names, dots and all", () => {
+  for (const mapper of ["/dev/dm-0", "/dev/mapper/luks-a.b"]) {
+    inLab(lab => assert.deepStrictEqual(unlockWith(lab, `Unlocked /dev/sdb1 as ${mapper}.`, "0"),
+      { status: 0, mounts: ["mount -b " + mapper] }))
+  }
+  inLab(lab => assert.deepStrictEqual(unlockWith(lab, "Unlocked /dev/sdb1 as /dev/dm-0.", "1"),
+    { status: 0, mounts: ["mount -o ro -b /dev/dm-0"] }))
+})
+
+check("an unlock that names no device mounts nothing rather than a guess", () => {
+  for (const answer of ["", "Unlocked /dev/sdb1", "Error unlocking"]) {
+    inLab(lab => assert.deepStrictEqual(unlockWith(lab, answer, "0"), { status: 1, mounts: [] }))
+  }
 })
 
 console.log("")
