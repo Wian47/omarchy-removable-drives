@@ -105,10 +105,33 @@ test("treats a disk with no partition table as one volume", () => {
   assert.strictEqual(devices[0].volumes[0].fsPath, "/dev/sdb")
 })
 
-test("reports an empty, unformatted disk with no volumes", () => {
-  const devices = api.parse(tree([disk({ children: [] })]))
-  assert.strictEqual(devices.length, 1)
-  assert.strictEqual(devices[0].volumes.length, 0)
+test("a blank disk is one volume that can be formatted and not mounted", () => {
+  const device = api.parse(tree([disk({ children: [] })]))[0]
+  assert.strictEqual(device.volumes.length, 1)
+  assert.strictEqual(device.volumes[0].fsPath, "/dev/sdb")
+  assert.strictEqual(api.isMountable(device.volumes[0]), false)
+  const caps = api.parseFsCapabilities('Supported as 1 "exfat"')
+  assert.strictEqual(api.canFormat(caps, device.volumes[0], device), null)
+})
+
+test("a disk used whole by something else is not offered as a blank one", () => {
+  const device = api.parse(tree([disk({ children: [
+    { name: "md0", path: "/dev/md0", type: "raid1", size: 1000, children: [] }
+  ] })]))[0]
+  assert.deepStrictEqual(device.volumes, [])
+})
+
+test("ignores a reader with nothing in it", () => {
+  for (const size of [0, null, undefined]) {
+    assert.strictEqual(api.parse(tree([disk({ size })])).length, 0, String(size))
+  }
+})
+
+test("ignores the firmware areas of an eMMC chip, but not the card itself", () => {
+  for (const name of ["mmcblk0boot0", "mmcblk0boot1", "mmcblk1rpmb"]) {
+    assert.strictEqual(api.parse(tree([disk({ name, path: "/dev/" + name })])).length, 0, name)
+  }
+  assert.strictEqual(api.parse(tree([disk({ name: "mmcblk0", path: "/dev/mmcblk0" })])).length, 1)
 })
 
 test("a drive can be mounted one day if anything on it is mountable, mounted or locked", () => {

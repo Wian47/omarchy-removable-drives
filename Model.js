@@ -122,13 +122,17 @@ var UNMOUNTABLE = ["swap", "LVM2_member", "linux_raid_member", "zfs_member", "dd
 // worth making, so any disk holding one of these is dropped entirely.
 var SYSTEM_MOUNTS = ["/", "/boot", "/boot/efi", "/efi", "/home", "/var", "/usr", "/nix", "/nix/store", "[SWAP]"]
 
+// The boot and replay-protected areas of an eMMC chip are separate disks to the
+// kernel, marked removable like the rest of the chip. They hold firmware.
 function isVirtual(name) {
-  return /^(zram|loop|ram|dm-|md|sr|fd)/.test(String(name || ""))
+  return /^(zram|loop|ram|dm-|md|sr|fd|mmcblk\d+(boot|rpmb))/.test(String(name || ""))
 }
 
 function isCandidateDisk(node) {
   if (!node || node.type !== "disk") return false
   if (isVirtual(node.name)) return false
+  // A card reader with no card in it, or a player that is not sharing its disk.
+  if (!(Number(node.size) > 0)) return false
   return node.rm === true || node.hotplug === true
 }
 
@@ -239,8 +243,11 @@ function buildDevice(node) {
   }
 
   if (parts.length === 0) {
-    // A stick formatted without a partition table: the disk *is* the volume.
-    if (clean(node.fstype) !== "" || exact(node.mountpoint) !== "") volumes.push(buildVolume(node, 1))
+    // A stick formatted without a partition table: the disk *is* the volume. So
+    // is a blank one, which has to be on screen before it can be formatted.
+    if (kids.length === 0 || clean(node.fstype) !== "" || exact(node.mountpoint) !== "") {
+      volumes.push(buildVolume(node, 1))
+    }
   } else {
     for (var p = 0; p < parts.length; p++) volumes.push(buildVolume(parts[p], p + 1))
   }
