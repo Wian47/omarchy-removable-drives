@@ -276,8 +276,9 @@ bus through `busctl`. It is still `allow_active: yes`, the same no-password
 path mounting takes. The object path is asked for rather than built, since
 udisks escapes the kernel name into it and an unlocked LUKS volume lands at
 `dm_2d3`. The rename and the fsck unmount the filesystem first and mount it
-back afterwards, whether or not the middle step worked; the format does
-neither, because a mounted volume is refused outright rather than taken offline
+back afterwards, whether or not the middle step worked. It goes back read-only
+if it was read-only before, if the drive is set to mount that way, or if the
+fsck found errors. The format does neither, because a mounted volume is refused outright rather than taken offline
 on the way to being erased.
 
 A format is checked as one plan — which volume, which type, which label,

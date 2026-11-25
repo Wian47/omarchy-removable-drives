@@ -98,6 +98,14 @@ attempt "a sleep list whose last line is never read" \
   "sed -i 's|printf \"%s.*n\" \"\$1\" > \"\$2\"|printf %s \"\$1\" > \"\$2\"|' Service.qml" \
   shell
 
+attempt "a read-only volume put back writable after a rename" \
+  "sed -i 's|then set -- \"\$@\" -o ro; fi|then :; fi|' Service.qml" \
+  shell
+
+attempt "a caller that never says the volume is read-only" \
+  "sed -i 's|method, label, readOnly ? \"1\" : \"0\"\]|method, label]|' Service.qml" \
+  shell
+
 echo
 echo "caught $pass, missed $missed"
 [ "$missed" -eq 0 ] || exit 1

@@ -379,6 +379,55 @@ check("going to sleep with nothing mounted unmounts nothing", () => inLab(lab =>
   assert.deepStrictEqual(suspendWith(lab, []), [])
 }))
 
+// Answers the object lookup and then the one call the script is about.
+function runFs(lab, args, answer) {
+  const stub = stubCommands(lab, {
+    busctl: 'case "$*" in *ResolveDevice*) echo \'ao 1 "/org/freedesktop/UDisks2/block_devices/sdb1"\' ;; ' +
+      `*) ${answer} ;; esac`
+  })
+  const result = runScript("fsScript", ["/dev/sdb1", ...args], stub.bin)
+  return { status: result.status, stdout: result.stdout, calls: stub.calls() }
+}
+
+const REMOUNTED = ["unmount -b /dev/sdb1", "mount -b /dev/sdb1"]
+const REMOUNTED_READ_ONLY = ["unmount -b /dev/sdb1", "mount -b /dev/sdb1 -o ro"]
+
+check("a rename or a check puts a read-only volume back read-only", () => {
+  for (const [method, answer] of [["SetLabel", "true"], ["Check", "echo b true"], ["Repair", "echo b true"]]) {
+    inLab(lab => assert.deepStrictEqual(runFs(lab, ["1", method, "", "1"], answer).calls,
+      REMOUNTED_READ_ONLY, method))
+    inLab(lab => assert.deepStrictEqual(runFs(lab, ["1", method, "", "0"], answer).calls,
+      REMOUNTED, method))
+  }
+})
+
+check("a volume that fails its check is put back read-only", () => {
+  inLab(lab => assert.deepStrictEqual(runFs(lab, ["1", "Check", "", "0"], "echo b false"),
+    { status: 0, stdout: "b false\n", calls: REMOUNTED_READ_ONLY }))
+})
+
+check("a step that fails still puts the volume back the way it was", () => {
+  for (const method of ["SetLabel", "Check"]) {
+    inLab(lab => {
+      const result = runFs(lab, ["1", method, "NAME", "1"], "exit 3")
+      assert.strictEqual(result.status, 3)
+      assert.deepStrictEqual(result.calls, REMOUNTED_READ_ONLY)
+    })
+  }
+})
+
+check("a volume that was not mounted is not mounted afterwards", () => {
+  inLab(lab => assert.deepStrictEqual(runFs(lab, ["0", "Check", "", "1"], "echo b false").calls, []))
+})
+
+// The script can only honour what it is told, so the caller is checked as well.
+check("the caller tells the script whether the volume is read-only", () => {
+  const start = serviceSource.indexOf("function runFsAction(")
+  const body = serviceSource.slice(start, serviceSource.indexOf("\n  }", start))
+  assert.match(body, /readOnlyFor\(volume\) \|\| Model\.shouldMountReadOnly\(/)
+  assert.match(body, /label, readOnly \? "1" : "0"\]/)
+})
+
 console.log("")
 if (failures > 0) {
   console.log(failures === 1 ? "1 check failed." : failures + " checks failed.")

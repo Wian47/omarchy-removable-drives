@@ -1075,6 +1075,9 @@ Item {
   // it back. The mount is restored whether or not the middle step worked — a
   // rename udisks refused should not also leave the drive unmounted.
   //
+  // It goes back read-only if it was, if the drive is saved as read-only, or if
+  // the fsck just found errors that writing could make worse.
+  //
   // The object path is asked for rather than built. udisks escapes the kernel
   // name into it, so an unlocked LUKS volume at /dev/mapper/backup is
   // .../block_devices/dm_2d3, and a plugin guessing at that encoding would
@@ -1089,6 +1092,7 @@ Item {
     'remount=$2',
     'method=$3',
     'label=${4-}',
+    'ro=${5-0}',
     'raw=$(busctl call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager' +
       ' org.freedesktop.UDisks2.Manager ResolveDevice "a{sv}a{sv}" 1 path s "$dev" 0) || exit 1',
     // The path is the last field and arrives wrapped in quotes. Trimming from
@@ -1110,8 +1114,10 @@ Item {
     // An fsck has no useful upper bound — a big NTFS volume can take an hour —
     // so the bus timeout is a day rather than busctl's default 25 seconds,
     // which would abandon the call while the tool was still working.
-    '  busctl --timeout=86400 call org.freedesktop.UDisks2 "$obj"' +
-      ' org.freedesktop.UDisks2.Filesystem "$method" "a{sv}" 0 || rc=$?',
+    '  verdict=$(busctl --timeout=86400 call org.freedesktop.UDisks2 "$obj"' +
+      ' org.freedesktop.UDisks2.Filesystem "$method" "a{sv}" 0) || rc=$?',
+    '  printf "%s\\n" "$verdict"',
+    '  if [ "$verdict" = "b false" ]; then ro=1; fi',
     'fi',
     // Putting the filesystem back can fail on its own — the drive was renamed
     // or repaired and is now sitting unmounted. Swallowing that reported the
@@ -1119,7 +1125,11 @@ Item {
     // comes back as its own exit code when nothing else went wrong, and as an
     // extra line on stderr when something did.
     'remount_rc=0',
-    'if [ "$remount" = 1 ]; then udisksctl mount --no-user-interaction -b "$dev" >/dev/null || remount_rc=$?; fi',
+    'if [ "$remount" = 1 ]; then',
+    '  set -- mount --no-user-interaction -b "$dev"',
+    '  if [ "$ro" = 1 ]; then set -- "$@" -o ro; fi',
+    '  udisksctl "$@" >/dev/null || remount_rc=$?',
+    'fi',
     'if [ "$remount_rc" != 0 ]; then',
     '  echo "the filesystem could not be mounted again" >&2',
     '  if [ "$rc" = 0 ]; then rc=75; fi',
@@ -1189,8 +1199,9 @@ Item {
   }
 
   function runFsAction(volume, method, label, action, successMessage) {
+    var readOnly = readOnlyFor(volume) || Model.shouldMountReadOnly(store, deviceOfVolume(volume))
     runAction(["bash", "-c", fsScript, "removable-drives",
-               volume.fsPath, volume.mounted ? "1" : "0", method, label],
+               volume.fsPath, volume.mounted ? "1" : "0", method, label, readOnly ? "1" : "0"],
               volume.fsPath, action, successMessage)
   }
 
