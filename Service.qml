@@ -810,7 +810,8 @@ Item {
     store = next
     storeFile.setText(JSON.stringify(next) + "\n")
     // Re-apply immediately so the panel renames without waiting for lsblk.
-    var applied = devices.slice()
+    // Copied, because a row only notices a drive that is a different object.
+    var applied = JSON.parse(JSON.stringify(devices))
     Model.applyStore(applied, next)
     devices = applied
     return "ok"

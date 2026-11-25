@@ -154,6 +154,16 @@ test("fixing the file clears the complaint and saving works again", () => {
     [{ version: 1, drives: { "serial:S1": { readOnly: true, nickname: "Backup" } } }])
 })
 
+test("a saved setting reaches the rows as a different object, and leaves the old one alone", () => {
+  const drives = service()
+  drives.applySnapshot(snapshot())
+  const before = drives.devices[0]
+  drives.setNickname(before, "Backup")
+  assert.notStrictEqual(drives.devices[0], before)
+  assert.strictEqual(drives.devices[0].title, "Backup")
+  assert.strictEqual(before.title, "V Stick")
+})
+
 console.log("\nconnect hooks")
 
 const HOOKED = '{"drives":{"serial:S1":{"onConnect":"backup"}}}'

@@ -55,10 +55,8 @@ Panel {
   // is handed to the process, and is cleared the moment it is.
   property string unlockingPath: ""
 
-  // fsPath of the volume whose format is being set up, "" when none is. The
-  // chosen type and the erase choice live up here rather than in the row,
-  // because a refresh rebuilds the rows underneath a half-answered format and
-  // the answers should not go with them.
+  // fsPath of the volume whose format is being set up, "" when none is, with
+  // the chosen type and the erase choice.
   property string formattingPath: ""
   property string formatType: ""
   property bool formatQuick: true
@@ -701,8 +699,14 @@ Panel {
             horizontalAlignment: Text.AlignHCenter
           }
 
+          // Matched by path, so a refresh updates the rows in place. A plain
+          // list rebuilds every row when anything on any drive changes, free
+          // space included, and takes whatever was being typed with it.
           Repeater {
-            model: root.devices
+            model: ScriptModel {
+              values: root.devices
+              objectProp: "path"
+            }
 
             Column {
               id: deviceBlock
@@ -719,7 +723,10 @@ Panel {
               }
 
               Repeater {
-                model: deviceBlock.modelData.volumes
+                model: ScriptModel {
+                  values: deviceBlock.modelData.volumes
+                  objectProp: "fsPath"
+                }
 
                 VolumeRow {
                   required property var modelData

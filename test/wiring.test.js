@@ -207,6 +207,16 @@ check("the service follows mounts as well as devices", () => {
     .map(tool => `nothing in Service.qml rescans on what ${tool} reports, and restarts it when it dies`)
 })
 
+// The rows hold text fields. Handed a plain list, a Repeater rebuilds them all
+// whenever the list changes, and a half-typed passphrase is gone.
+check("a refresh does not rebuild the rows someone may be typing in", () => {
+  const models = [...panelSource.matchAll(/Repeater \{\s*model: (\w+ \{[^}]*\}|.*)/g)].map(m => m[1])
+  return [["root.devices", "path"], ["deviceBlock.modelData.volumes", "fsPath"]]
+    .filter(([values, key]) => !models.some(model => model.startsWith("ScriptModel {") &&
+      model.includes("values: " + values + "\n") && model.includes(`objectProp: "${key}"`)))
+    .map(([values, key]) => `Panel.qml repeats ${values} without matching rows by ${key}`)
+})
+
 // A verb the README promises and the handler never grew fails only for the
 // person who copied the line out of the README.
 const IPC_INTERNAL = new Set(["open", "close", "show", "hide", "toggle"])

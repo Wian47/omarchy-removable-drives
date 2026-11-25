@@ -46,6 +46,9 @@ attempt "a device path concatenated into a command instead of quoted" \
 attempt "a mount nobody is told about" \
   "sed -i 's|if (Model.isDriveMountEvent(line)) debounce.restart()|Model.isDriveMountEvent(line)|' Service.qml"
 
+attempt "rows rebuilt under whoever is typing in them" \
+  "sed -i '/objectProp: \"fsPath\"/d' Panel.qml"
+
 attempt "a scripting verb the README promises but nothing handles" \
   "sed -i 's|omarchy-shell removable-drives toggle|omarchy-shell removable-drives defragment|' README.md"
 
