@@ -203,6 +203,18 @@ test("a hook still waiting when the drive goes does not run for the next one", (
   assert.deepStrictEqual(drives._hooksWaiting, {})
 })
 
+test("a drive stays busy, and keeps being polled, when the first poll comes too early", () => {
+  const drives = hooked()
+  drives.applySnapshot(snapshot({}, MOUNTED))
+  drives.applyHooks("==> serial_S1 0 <==\n")
+  assert.strictEqual(drives.isDeviceBusy(drives.devices[0]), true, "eject would not wait for the hook")
+  assert.deepStrictEqual(drives.hooksWorthPolling(), ["serial_S1"])
+
+  drives.applyHooks("==> serial_S1 1 <==\npercent=10\n")
+  drives.applyHooks("==> serial_S1 0 <==\npercent=10\n")
+  assert.strictEqual(drives.isDeviceBusy(drives.devices[0]), false)
+})
+
 test("a drive attached before the shell started does not run its hook", () => {
   const drives = service()
   drives.loadStore(HOOKED)

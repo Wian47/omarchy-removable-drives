@@ -966,7 +966,7 @@ Item {
     var next = {}
     for (var i = 0; i < live.length; i++) {
       var name = live[i]
-      if (report[name] !== undefined) next[name] = report[name]
+      if (report[name] !== undefined) next[name] = Model.mergeHookState(hooks[name], report[name], Date.now())
       else if (hooks[name] !== undefined) next[name] = hooks[name]
     }
     hooks = next
@@ -980,7 +980,7 @@ Item {
   function markHookStarted(name) {
     var next = {}
     for (var key in hooks) next[key] = hooks[key]
-    next[name] = { active: true, percent: null, status: "", done: false }
+    next[name] = { active: true, percent: null, status: "", done: false, startedAt: Date.now() }
     hooks = next
   }
 

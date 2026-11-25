@@ -930,6 +930,17 @@ function hookState(progress, running) {
   }
 }
 
+// A hook records its pid a moment after it is launched, and the first poll can
+// get there before it does. Within this long of the launch, an answer that the
+// hook is not running is one that came too early.
+var HOOK_START_GRACE_MS = 3000
+
+function mergeHookState(previous, reported, now) {
+  if (reported.active || !previous || !previous.active) return reported
+  if (previous.startedAt !== undefined && now - previous.startedAt < HOOK_START_GRACE_MS) return previous
+  return reported
+}
+
 // The sibling of activityLabel: what the row says while the hook runs. A hook
 // that reports nothing still gets a line, because the drive is being written
 // to and the silence is what the feature exists to end.

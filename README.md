@@ -318,7 +318,7 @@ The tests assert it refuses `/`, `$HOME`, the mount root, a symlinked trash
 folder, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 240 tests, no compositor required
+node test/model.test.js       # 242 tests, no compositor required
 node test/shell.test.js       # lints and runs the shell inside Service.qml
 node test/service.test.js     # runs the functions inside Service.qml
 omarchy plugin validate .     # the same check the shell applies

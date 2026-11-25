@@ -1771,6 +1771,27 @@ test("no hook at all is not a finished hook", () => {
   assert.strictEqual(state.done, false, "nothing ran, so nothing finished")
 })
 
+test("a poll that beats the hook to its pid file does not end it", () => {
+  const launched = { active: true, percent: null, status: "", done: false, startedAt: 1000 }
+  const tooEarly = api.hookState(null, false)
+  assert.strictEqual(api.mergeHookState(launched, tooEarly, 1010).active, true)
+
+  const lastRun = api.hookState({ percent: 100, status: "", done: true }, false)
+  assert.strictEqual(api.mergeHookState(launched, lastRun, 1010).active, true,
+    "the progress file can still hold what the previous run wrote")
+})
+
+test("a hook that really has ended is believed", () => {
+  const launched = { active: true, percent: null, status: "", done: false, startedAt: 1000 }
+  const ended = api.hookState(null, false)
+  assert.strictEqual(api.mergeHookState(launched, ended, 1000 + api.HOOK_START_GRACE_MS).active, false)
+
+  const seenRunning = api.mergeHookState(launched, api.hookState(null, true), 1500)
+  assert.strictEqual(api.mergeHookState(seenRunning, ended, 1600).active, false,
+    "once it has been seen running there is nothing left to wait for")
+  assert.strictEqual(api.mergeHookState(undefined, ended, 1000).active, false)
+})
+
 test("the row says what the hook says, and says something when it says nothing", () => {
   assert.strictEqual(api.hookLabel(api.hookState({ percent: 5, status: "Copying", done: false }, true)), "Copying")
   assert.strictEqual(api.hookLabel(api.hookState({ percent: 5, status: "", done: false }, true)),
