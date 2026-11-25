@@ -49,6 +49,9 @@ attempt "a mount nobody is told about" \
 attempt "rows rebuilt under whoever is typing in them" \
   "sed -i '/objectProp: \"fsPath\"/d' Panel.qml"
 
+attempt "an lsblk column the model reads and nobody asks for" \
+  "sed -i 's|MOUNTPOINT,MOUNTPOINTS,|MOUNTPOINT,|' Service.qml"
+
 attempt "a scripting verb the README promises but nothing handles" \
   "sed -i 's|omarchy-shell removable-drives toggle|omarchy-shell removable-drives defragment|' README.md"
 

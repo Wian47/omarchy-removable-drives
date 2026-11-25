@@ -83,6 +83,15 @@ test("refuses to offer the disk the system is running from", () => {
   assert.strictEqual(devices.length, 0)
 })
 
+test("a system mount counts even when lsblk names another mount of the same filesystem", () => {
+  // Captured from a btrfs root: MOUNTPOINT holds one subvolume, and not "/".
+  const devices = api.parse(tree([disk({ children: [part({
+    fstype: "btrfs", mountpoint: "/var/log",
+    mountpoints: ["/var/log", "/home", "/var/cache/pkg", "/"]
+  })] })]))
+  assert.strictEqual(devices.length, 0)
+})
+
 test("keeps a drive whose mount point merely looks systemish", () => {
   const devices = api.parse(tree([disk({ children: [part({ mountpoint: "/run/media/wian47/BACKUP" })] })]))
   assert.strictEqual(devices.length, 1)

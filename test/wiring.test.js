@@ -217,6 +217,19 @@ check("a refresh does not rebuild the rows someone may be typing in", () => {
     .map(([values, key]) => `Panel.qml repeats ${values} without matching rows by ${key}`)
 })
 
+// A column nobody asks lsblk for reads as missing, and a rule built on it is
+// quietly never true.
+check("every lsblk field Model reads is a column Service asks for", () => {
+  const columns = serviceSource.match(/"lsblk", "-J", "-b", "-o",\s*"([A-Z,]+)"/)
+  if (!columns) return ["Service.qml has no lsblk command this check can read"]
+  const asked = columns[1].toLowerCase().split(",")
+  // What the tree itself provides, and what a built device has instead.
+  const structural = ["children", "volumes"]
+  return [...new Set([...modelSource.matchAll(/\b(?:node|part|fsNode)\.([a-z]+)\b/g)].map(m => m[1]))]
+    .filter(field => !structural.includes(field) && !asked.includes(field))
+    .map(field => `Model.js reads "${field}", which lsblk is not asked for`)
+})
+
 // A verb the README promises and the handler never grew fails only for the
 // person who copied the line out of the README.
 const IPC_INTERNAL = new Set(["open", "close", "show", "hide", "toggle"])

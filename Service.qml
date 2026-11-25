@@ -1662,7 +1662,7 @@ Item {
   Process {
     id: lsblkProcess
     command: ["lsblk", "-J", "-b", "-o",
-              "NAME,PATH,LABEL,PARTLABEL,FSTYPE,SIZE,FSSIZE,FSAVAIL,FSUSED,MOUNTPOINT,RM,HOTPLUG,TYPE,TRAN,VENDOR,MODEL,UUID,SERIAL"]
+              "NAME,PATH,LABEL,PARTLABEL,FSTYPE,SIZE,FSSIZE,FSAVAIL,FSUSED,MOUNTPOINT,MOUNTPOINTS,RM,HOTPLUG,TYPE,TRAN,VENDOR,MODEL,UUID,SERIAL"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applySnapshot(text)
