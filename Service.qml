@@ -1375,17 +1375,21 @@ Item {
   // back as the sentence the panel would have shown, so a script calling this
   // over IPC learns why nothing happened — and the plan is validated whole,
   // against the volume it names, before a byte of it reaches the bus.
-  function formatVolume(volume, fstype, label, quick) {
+  //
+  // `identity` is the volume the plan was made for. A call that names the
+  // volume and runs at once has nothing to compare it with, and leaves it out.
+  function formatVolume(volume, fstype, label, quick, identity) {
     if (!volume) return "unknown volume"
     if (busy) return refuse("Another action is still running")
 
+    var device = deviceOfVolume(volume)
     var plan = {
-      fsPath: volume.fsPath,
+      identity: identity === undefined ? Model.volumeIdentity(device, volume) : identity,
       fstype: Model.clean(fstype),
       label: Model.normaliseLabel(label),
       quick: quick !== false
     }
-    var checked = Model.validateFormat(fsCapabilities, volume, deviceOfVolume(volume), plan)
+    var checked = Model.validateFormat(fsCapabilities, volume, device, plan)
     if (!checked.ok) return refuse(checked.reason)
 
     var blocked = fsActionBlocked(volume)
@@ -1396,8 +1400,8 @@ Item {
     // file manager opening over it.
     _openAfterPath = ""
     runAction(["bash", "-c", formatScript, "removable-drives",
-               plan.fsPath, plan.fstype, plan.label, plan.quick ? "0" : "1"],
-              plan.fsPath, "format", Model.describeFormat(volume, plan.fstype))
+               volume.fsPath, plan.fstype, plan.label, plan.quick ? "0" : "1"],
+              volume.fsPath, "format", Model.describeFormat(volume, plan.fstype))
     return "ok"
   }
 

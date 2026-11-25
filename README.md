@@ -287,8 +287,8 @@ on the way to being erased.
 
 A format is checked as one plan — which volume, which type, which label,
 whether to zero the drive first — rather than as four arguments each looked at
-somewhere along the way, and the plan names the `/dev` node it was made for, so
-swapping the stick between planning it and confirming it retracts the format
+somewhere along the way, and the plan names the drive it was made for rather
+than the `/dev` node it sat on, so swapping the stick between planning it and confirming it retracts the format
 instead of pointing it at the replacement.
 
 Health comes the same way, off `org.freedesktop.UDisks2.Drive.Ata` or
@@ -318,7 +318,7 @@ The tests assert it refuses `/`, `$HOME`, the mount root, a symlinked trash
 folder, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 249 tests, no compositor required
+node test/model.test.js       # 250 tests, no compositor required
 node test/shell.test.js       # lints and runs the shell inside Service.qml
 node test/service.test.js     # runs the functions inside Service.qml
 omarchy plugin validate .     # the same check the shell applies

@@ -1582,8 +1582,8 @@ function describeRepair(volume, repaired) {
 //
 // The one action here that destroys data on purpose. So it is not a call with
 // four arguments that each get checked somewhere along the way — it is a plan,
-// { fsPath, fstype, label, quick }, approved as a whole before any part of it
-// reaches the bus. The fsPath is in the plan for the same reason a repair
+// { identity, fstype, label, quick }, approved as a whole before any part of it
+// reaches the bus. The identity is in the plan for the same reason a repair
 // carries a UUID: a /dev path is reusable, and a plan made while one stick was
 // in the socket must not run against the one that replaced it.
 
@@ -1611,6 +1611,13 @@ function formatTypes(caps) {
 function formatTarget(fstype) {
   var fs = clean(fstype)
   return { fstype: fs, fstypeLabel: formatFsType(fs), encrypted: false, unlocked: false }
+}
+
+// Which volume this is, as opposed to where it is plugged in. Size is in it for
+// the stick that reports no serial and holds no filesystem to have a UUID.
+function volumeIdentity(device, volume) {
+  if (!device || !volume) return ""
+  return [driveKey(device), exact(volume.fsPath), exact(volume.uuid), volume.sizeBytes].join("\n")
 }
 
 // The pairing the panel drew: this volume is one of the ones on that drive.
@@ -1655,7 +1662,7 @@ function validateFormat(caps, volume, device, plan) {
   var refusal = canFormat(caps, volume, device)
   if (refusal !== null) return { ok: false, reason: refusal }
   if (!plan) return { ok: false, reason: "No format was planned" }
-  if (exact(plan.fsPath) !== exact(volume.fsPath)) {
+  if (exact(plan.identity) !== volumeIdentity(device, volume)) {
     return { ok: false, reason: "That format was planned for a different volume" }
   }
   if (plan.quick !== true && plan.quick !== false) {

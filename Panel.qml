@@ -58,6 +58,7 @@ Panel {
   // fsPath of the volume whose format is being set up, "" when none is, with
   // the chosen type and the erase choice.
   property string formattingPath: ""
+  property string formattingIdentity: ""
   property string formatType: ""
   property bool formatQuick: true
 
@@ -206,6 +207,7 @@ Panel {
     var types = Model.formatTypes(drives.fsCapabilities)
     formatType = types.indexOf(volume.fstype) !== -1 ? volume.fstype : (types.length > 0 ? types[0] : "")
     formatQuick = true
+    formattingIdentity = Model.volumeIdentity(drives.deviceOfVolume(volume), volume)
     formattingPath = volume.fsPath
   }
 
@@ -268,7 +270,12 @@ Panel {
     // comes and goes underneath them; it is the fsPath that has to still
     // exist, not the mount.
     if (renamingLabelPath !== "" && !drives.volumeByPath(renamingLabelPath)) renamingLabelPath = ""
-    if (formattingPath !== "" && !drives.volumeByPath(formattingPath)) formattingPath = ""
+    // A format needs more than the path: the stick that was swapped in has the
+    // same one, and the code to type is made from it.
+    if (formattingPath !== "") {
+      var target = drives.volumeByPath(formattingPath)
+      if (Model.volumeIdentity(drives.deviceOfVolume(target), target) !== formattingIdentity) formattingPath = ""
+    }
     // An unlock replaces the locked volume with its mapper, so the row this
     // field belongs to is gone the moment it succeeds.
     if (unlockingPath !== "") {
@@ -1202,7 +1209,7 @@ Panel {
     // than after the drive has been erased to hold it.
     readonly property var formatCheck: formatting
       ? Model.validateFormat(drives.fsCapabilities, volume, drives.deviceOfVolume(volume),
-                             { fsPath: volume.fsPath, fstype: root.formatType,
+                             { identity: root.formattingIdentity, fstype: root.formatType,
                                label: formatLabelField.text, quick: root.formatQuick })
       : null
     readonly property int formatRoom: formatting
@@ -1247,7 +1254,8 @@ Panel {
     // in the field reaches this without passing the button's enabled state.
     function commitFormat() {
       if (!Model.formatConfirmed(volumeRow.volume, confirmField.text)) return
-      drives.formatVolume(volumeRow.volume, root.formatType, formatLabelField.text, root.formatQuick)
+      drives.formatVolume(volumeRow.volume, root.formatType, formatLabelField.text, root.formatQuick,
+                          root.formattingIdentity)
       root.finishFormat()
     }
 

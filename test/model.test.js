@@ -1346,7 +1346,8 @@ function stick(overrides) {
 }
 
 function plan(overrides) {
-  return Object.assign({ fsPath: "/dev/sdb1", fstype: "exfat", label: "PHOTOS", quick: true }, overrides)
+  return Object.assign({ identity: api.volumeIdentity(FORMAT_DRIVE, FORMAT_VOLUME),
+                         fstype: "exfat", label: "PHOTOS", quick: true }, overrides)
 }
 
 const FORMAT_DRIVE = stick({})
@@ -1456,10 +1457,30 @@ test("every refusal canFormat has is a refusal the plan has", () => {
 })
 
 test("a plan aimed at a volume other than the one it is checked against is refused", () => {
-  const result = api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ fsPath: "/dev/sdb2" }))
-  assert.strictEqual(result.ok, false)
-  assert.match(result.reason, /planned for a different volume/,
-    "a /dev path is reusable, so a plan made for one stick must not run against its replacement")
+  const swapped = [
+    api.parse(tree([disk({ serial: "OTHER", children: [part({})] })]))[0],
+    stick({ uuid: "NEW-UUID" }),
+    stick({ size: 1000 }),
+    stick({ path: "/dev/sdb2" })
+  ]
+  for (const drive of swapped) {
+    const result = api.validateFormat(FORMAT_CAPS, drive.volumes[0], drive, plan({}))
+    assert.strictEqual(result.ok, false)
+    assert.match(result.reason, /planned for a different volume/,
+      "a /dev path is reusable, so a plan made for one stick must not run against its replacement")
+  }
+  for (const identity of ["", undefined, null]) {
+    assert.strictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ identity })).ok, false)
+  }
+})
+
+test("a volume is the same one after a rescan, a mount or a rename", () => {
+  const identity = api.volumeIdentity(FORMAT_DRIVE, FORMAT_VOLUME)
+  for (const overrides of [{}, { mountpoint: "/run/media/x/STICK" }, { label: "RENAMED" }]) {
+    const drive = stick(overrides)
+    assert.strictEqual(api.volumeIdentity(drive, drive.volumes[0]), identity)
+  }
+  assert.strictEqual(api.volumeIdentity(null, null), "")
 })
 
 test("a plan that does not say whether to erase the drive first is refused", () => {

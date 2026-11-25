@@ -73,14 +73,17 @@ function load(file, given) {
   const compile = text => new Function("scope", "with (scope) { return (" + text + ") }")(scope)
 
   for (const match of source.matchAll(/^  \w+ \{\n    id: (\w+)\n([\s\S]*?)^  \}/gm)) {
-    const object = scope[match[1]] = { ...standIn(), ...(given && given[match[1]]) }
-    Object.defineProperty(object, "running", Object.getOwnPropertyDescriptor(standIn(), "running"))
+    if (given && match[1] in given) continue
+    const object = scope[match[1]] = standIn()
     for (const handler of match[2].matchAll(/^    (on[A-Z]\w*): (function\([\s\S]*?^    \})/gm)) {
       object[handler[1]] = compile(handler[2])
     }
   }
   for (const match of source.matchAll(/^  function (\w+)\(([^)]*)\) \{\n([\s\S]*?)^  \}/gm)) {
     scope[match[1]] = compile(`function(${match[2]}) {\n${match[3]}}`)
+  }
+  for (const match of source.matchAll(/^  (on[A-Z]\w*): (\{\n[\s\S]*?^  \})/gm)) {
+    scope[match[1]] = compile(`function() ${match[2]}`)
   }
   for (const property of propertiesIn(source)) {
     if (given && property.name in given) continue
@@ -305,6 +308,51 @@ test("a drive that was ejected goes without a warning, even seen mounted on the 
   drives.actionProcess.onExited(0)
   drives.applySnapshot(NOTHING)
   assert.strictEqual(warnings(drives), 0)
+})
+
+console.log("\nformatting")
+
+const CAPS = { check: {}, repair: {}, format: ["exfat", "ext4"] }
+
+function panel(drives) {
+  return load("Panel.qml", { drives, devices: drives.devices, rows: [] })
+}
+
+test("a format set up for one stick does not run on the one that replaced it", () => {
+  const drives = service({ fsCapabilities: CAPS })
+  drives.applySnapshot(snapshot())
+  const view = panel(drives)
+  view.beginFormat(drives.devices[0].volumes[0])
+  assert.strictEqual(view.formattingPath, "/dev/sdb1")
+
+  drives.applySnapshot(snapshot({ serial: "S2" }))
+  const result = drives.formatVolume(drives.devices[0].volumes[0], "exfat", "", true, view.formattingIdentity)
+  assert.match(result, /different volume/)
+  assert.deepStrictEqual(drives.actionProcess.started, [])
+
+  view.devices = drives.devices
+  view.onRowsChanged()
+  assert.strictEqual(view.formattingPath, "", "the editor stayed open over the new stick")
+})
+
+test("a format runs on the stick it was set up for", () => {
+  const drives = service({ fsCapabilities: CAPS })
+  drives.applySnapshot(snapshot())
+  const view = panel(drives)
+  view.beginFormat(drives.devices[0].volumes[0])
+  drives.applySnapshot(snapshot())
+  view.devices = drives.devices
+  view.onRowsChanged()
+  assert.strictEqual(view.formattingPath, "/dev/sdb1")
+  assert.strictEqual(
+    drives.formatVolume(drives.devices[0].volumes[0], "exfat", "", true, view.formattingIdentity), "ok")
+  assert.strictEqual(drives.actionProcess.started.length, 1)
+})
+
+test("a format asked for by a script names its volume and needs no plan made earlier", () => {
+  const drives = service({ fsCapabilities: CAPS })
+  drives.applySnapshot(snapshot())
+  assert.strictEqual(drives.formatVolume(drives.devices[0].volumes[0], "exfat", "", true), "ok")
 })
 
 console.log(failures === 0 ? "\nAll service tests passed." : `\n${failures} service test(s) failed.`)
