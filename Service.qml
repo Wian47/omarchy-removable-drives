@@ -1360,8 +1360,10 @@ Item {
     '  /org/freedesktop/UDisks2/block_devices/*) ;;',
     '  *) echo "udisks does not recognise $dev" >&2; exit 1 ;;',
     'esac',
-    'count=1',
-    'set -- take-ownership b true',
+    // Without the second option a partition keeps the type of what was on it,
+    // and Windows gives no drive letter to exFAT on one marked as Linux.
+    'count=2',
+    'set -- take-ownership b true update-partition-type b true',
     'if [ -n "$label" ]; then count=$((count + 1)); set -- "$@" label s "$label"; fi',
     'if [ "$erase" = 1 ]; then count=$((count + 1)); set -- "$@" erase s zero; fi',
     // Zeroing a drive has no useful upper bound and neither does laying down a

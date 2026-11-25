@@ -456,6 +456,33 @@ check("the guard re-arms after the machine wakes", () => inLab(lab => {
   assert.deepStrictEqual(stub.calls(), ["unmount -b /dev/sdb1", "unmount -b /dev/sdb1"])
 }))
 
+function formatCall(lab, args) {
+  const log = path.join(lab, "format")
+  const stub = stubCommands(lab, {
+    busctl: 'case "$*" in *ResolveDevice*) echo \'ao 1 "/org/freedesktop/UDisks2/block_devices/sdb1"\' ;; ' +
+      `*) printf '%s\\n' "$@" > '${log}' ;; esac`
+  })
+  const result = runScript("formatScript", ["/dev/sdb1", ...args], stub.bin)
+  assert.strictEqual(result.status, 0, result.stderr)
+  const words = fs.readFileSync(log, "utf8").trimEnd().split("\n")
+  const [fstype, count, ...options] = words.slice(words.indexOf("sa{sv}") + 1)
+  // busctl reads the count and then that many name, type, value triples.
+  assert.strictEqual(options.length, 3 * Number(count), "the option count is wrong: " + words.join(" "))
+  return { fstype, options: options.join(" ") }
+}
+
+check("a format sets the partition type to match the new filesystem", () => {
+  inLab(lab => assert.deepStrictEqual(formatCall(lab, ["exfat", "", "0"]),
+    { fstype: "exfat", options: "take-ownership b true update-partition-type b true" }))
+})
+
+check("a format passes the label as one value and zeroes only when asked", () => {
+  inLab(lab => assert.deepStrictEqual(formatCall(lab, ["ext4", "MY  'STICK' $(id)", "1"]), {
+    fstype: "ext4",
+    options: "take-ownership b true update-partition-type b true label s MY  'STICK' $(id) erase s zero"
+  }))
+})
+
 console.log("")
 if (failures > 0) {
   console.log(failures === 1 ? "1 check failed." : failures + " checks failed.")
