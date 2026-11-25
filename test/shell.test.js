@@ -1,5 +1,5 @@
-// Lints the shell that Service.qml keeps in string arrays. Run with:
-// node test/shell.test.js
+// Lints the shell that Service.qml keeps in string arrays, and runs the scripts
+// that can lose data. Run with: node test/shell.test.js
 //
 // Model.js decides whether a format may run; formatScript is what erases the
 // drive. That half was the largest unchecked surface in the plugin: shellcheck
@@ -14,7 +14,8 @@
 const fs = require("fs")
 const os = require("os")
 const path = require("path")
-const { execFileSync } = require("child_process")
+const assert = require("assert")
+const { execFileSync, spawnSync } = require("child_process")
 
 const root = path.join(__dirname, "..")
 const serviceSource = fs.readFileSync(path.join(root, "Service.qml"), "utf8")
@@ -231,6 +232,284 @@ check("the embedded shell passes shellcheck", () => {
     })
   } finally {
     fs.rmSync(lab, { recursive: true, force: true })
+  }
+})
+
+// Resolved, because a temporary directory behind a symlink would look like the
+// very thing the trash check refuses.
+function inLab(fn) {
+  const lab = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "removable-drives-run-")))
+  try {
+    return fn(lab)
+  } finally {
+    fs.rmSync(lab, { recursive: true, force: true })
+  }
+}
+
+function runScript(name, args, bin, options) {
+  const script = scripts.find(candidate => candidate.name === name)
+  if (!script) throw new Error(name + " is not in Service.qml")
+  const env = bin ? { ...process.env, PATH: bin + path.delimiter + process.env.PATH } : process.env
+  return spawnSync("bash", ["-c", script.shell, "removable-drives", ...args],
+                   { encoding: "utf8", timeout: 10000, env, ...options })
+}
+
+// Replaces commands with one-line stand-ins, so nothing reaches a real drive.
+// udisksctl is always one of them, and records what it was asked to do.
+function stubCommands(lab, stubs) {
+  const bin = path.join(lab, "bin")
+  const log = path.join(lab, "calls")
+  fs.mkdirSync(bin)
+  fs.writeFileSync(log, "")
+  const all = { udisksctl: "true", ...stubs }
+  all.udisksctl = `printf '%s\\n' "$*" >> '${log}'; ${all.udisksctl}`
+  for (const name of Object.keys(all)) {
+    fs.writeFileSync(path.join(bin, name), `#!/usr/bin/env bash\n${all[name]}\n`, { mode: 0o755 })
+  }
+  return {
+    bin,
+    calls: () => fs.readFileSync(log, "utf8").split("\n").filter(Boolean)
+      .map(line => line.replace(" --no-user-interaction", ""))
+  }
+}
+
+check("a trash folder reached through a symlink is neither counted nor emptied", () => inLab(lab => {
+  const outside = path.join(lab, "outside", "1000")
+  const stick = path.join(lab, "stick")
+  fs.mkdirSync(outside, { recursive: true })
+  fs.mkdirSync(stick)
+  fs.writeFileSync(path.join(outside, "keep"), "not on the drive")
+  fs.symlinkSync(path.join(lab, "outside"), path.join(stick, ".Trash"))
+  fs.symlinkSync(outside, path.join(stick, ".Trash-1000"))
+
+  for (const link of [path.join(stick, ".Trash", "1000"), path.join(stick, ".Trash-1000")]) {
+    assert.strictEqual(runScript("trashProbeScript", [link]).stdout, "", link + " was counted")
+    assert.notStrictEqual(runScript("trashEmptyScript", [link]).status, 0, link + " was accepted")
+  }
+  assert.ok(fs.existsSync(path.join(outside, "keep")), "a file outside the drive was deleted")
+}))
+
+check("a real trash folder is counted and emptied, whatever the drive is called", () => inLab(lab => {
+  const trash = path.join(lab, "MY  STICK's", ".Trash-1000")
+  fs.mkdirSync(path.join(trash, "files"), { recursive: true })
+  fs.writeFileSync(path.join(trash, "files", "old"), "deleted")
+
+  const missing = path.join(lab, "MY  STICK's", ".Trash", "1000")
+  const sizes = runScript("trashProbeScript", [missing, trash]).stdout
+  assert.match(sizes, /^[0-9]+\t/)
+  assert.ok(sizes.endsWith("\t" + trash + "\n"), "unexpected probe output " + JSON.stringify(sizes))
+
+  const emptied = runScript("trashEmptyScript", [trash])
+  assert.strictEqual(emptied.status, 0, emptied.stderr)
+  assert.ok(!fs.existsSync(trash), "the trash is still there")
+  assert.strictEqual(runScript("trashEmptyScript", [trash]).status, 0,
+    "a trash that is already gone is not an error")
+}))
+
+check("eject does not report success over a volume that is still mounted", () => inLab(lab => {
+  const device = path.join(lab, "sdb")
+  fs.writeFileSync(device, "")
+  const stub = stubCommands(lab, { lsblk: "printf '\\n/run/media/x/B\\n'" })
+
+  const result = runScript("ejectScript", ["unmount", "/dev/sdb1", "power-off", device], stub.bin)
+  assert.notStrictEqual(result.status, 0)
+  assert.match(result.stderr, /still has a mounted volume/)
+  assert.deepStrictEqual(stub.calls(), ["unmount -b /dev/sdb1"])
+}))
+
+check("eject unmounts, locks, then powers off, in that order", () => inLab(lab => {
+  const device = path.join(lab, "sd b")
+  fs.writeFileSync(device, "")
+  const stub = stubCommands(lab, { lsblk: "printf '\\n\\n'" })
+
+  const result = runScript("ejectScript",
+    ["unmount", "/dev/mapper/luks-x", "lock", "/dev/sdb1", "power-off", device], stub.bin)
+  assert.strictEqual(result.status, 0, result.stderr)
+  assert.deepStrictEqual(stub.calls(),
+    ["unmount -b /dev/mapper/luks-x", "lock -b /dev/sdb1", "power-off -b " + device])
+}))
+
+check("eject survives a reader that cannot power off, and a device already gone", () => inLab(lab => {
+  const device = path.join(lab, "sdb")
+  fs.writeFileSync(device, "")
+  const stub = stubCommands(lab, { lsblk: "echo", udisksctl: "exit 1" })
+
+  const result = runScript("ejectScript",
+    ["power-off", device, "power-off", path.join(lab, "sdc")], stub.bin)
+  assert.strictEqual(result.status, 0, result.stderr)
+}))
+
+check("eject stops at the first unmount that fails", () => inLab(lab => {
+  const stub = stubCommands(lab, { udisksctl: "exit 1" })
+  const result = runScript("ejectScript", ["unmount", "/dev/sdb1", "power-off", "/dev/sdb"], stub.bin)
+  assert.notStrictEqual(result.status, 0)
+  assert.deepStrictEqual(stub.calls(), ["unmount -b /dev/sdb1"])
+}))
+
+check("eject does not treat an unreadable mount list as nothing mounted", () => inLab(lab => {
+  const device = path.join(lab, "sdb")
+  fs.writeFileSync(device, "")
+  const stub = stubCommands(lab, { lsblk: "exit 1" })
+  assert.notStrictEqual(runScript("ejectScript", ["power-off", device], stub.bin).status, 0)
+  assert.deepStrictEqual(stub.calls(), [])
+}))
+
+// The list is written by the same script the plugin uses, because the bug this
+// guards against was in how the two halves fit together.
+function suspendWith(lab, targets) {
+  const list = path.join(lab, "state", "targets")
+  const written = runScript("writeFileScript", [targets.join("\n"), list])
+  assert.strictEqual(written.status, 0, written.stderr)
+  const stub = stubCommands(lab, {
+    gdbus: "echo '/org/freedesktop/login1: org.freedesktop.login1.Manager.PrepareForSleep (true,)'; exec sleep 1",
+    // Runs what the lock was protecting, then stops the guard.
+    "systemd-inhibit": 'while [[ $1 == --* ]]; do shift; done; "$@"; kill "$PPID"'
+  })
+  runScript("suspendScript", [list, path.join(lab, "guard"), "0", ""], stub.bin)
+  return stub.calls()
+}
+
+check("going to sleep unmounts every drive on the list, including the last", () => {
+  inLab(lab => assert.deepStrictEqual(suspendWith(lab, ["/dev/sdb1"]), ["unmount -b /dev/sdb1"]))
+  inLab(lab => assert.deepStrictEqual(suspendWith(lab, ["/dev/sdb1", "/dev/mapper/luks-x"]),
+    ["unmount -b /dev/sdb1", "unmount -b /dev/mapper/luks-x"]))
+})
+
+check("going to sleep with nothing mounted unmounts nothing", () => inLab(lab => {
+  assert.deepStrictEqual(suspendWith(lab, []), [])
+}))
+
+// Answers the object lookup and then the one call the script is about.
+function runFs(lab, args, answer) {
+  const stub = stubCommands(lab, {
+    busctl: 'case "$*" in *ResolveDevice*) echo \'ao 1 "/org/freedesktop/UDisks2/block_devices/sdb1"\' ;; ' +
+      `*) ${answer} ;; esac`
+  })
+  const result = runScript("fsScript", ["/dev/sdb1", ...args], stub.bin)
+  return { status: result.status, stdout: result.stdout, calls: stub.calls() }
+}
+
+const REMOUNTED = ["unmount -b /dev/sdb1", "mount -b /dev/sdb1"]
+const REMOUNTED_READ_ONLY = ["unmount -b /dev/sdb1", "mount -b /dev/sdb1 -o ro"]
+
+check("a rename or a check puts a read-only volume back read-only", () => {
+  for (const [method, answer] of [["SetLabel", "true"], ["Check", "echo b true"], ["Repair", "echo b true"]]) {
+    inLab(lab => assert.deepStrictEqual(runFs(lab, ["1", method, "", "1"], answer).calls,
+      REMOUNTED_READ_ONLY, method))
+    inLab(lab => assert.deepStrictEqual(runFs(lab, ["1", method, "", "0"], answer).calls,
+      REMOUNTED, method))
+  }
+})
+
+check("a volume that fails its check is put back read-only", () => {
+  inLab(lab => assert.deepStrictEqual(runFs(lab, ["1", "Check", "", "0"], "echo b false"),
+    { status: 0, stdout: "b false\n", calls: REMOUNTED_READ_ONLY }))
+})
+
+check("a step that fails still puts the volume back the way it was", () => {
+  for (const method of ["SetLabel", "Check"]) {
+    inLab(lab => {
+      const result = runFs(lab, ["1", method, "NAME", "1"], "exit 3")
+      assert.strictEqual(result.status, 3)
+      assert.deepStrictEqual(result.calls, REMOUNTED_READ_ONLY)
+    })
+  }
+})
+
+check("a volume that was not mounted is not mounted afterwards", () => {
+  inLab(lab => assert.deepStrictEqual(runFs(lab, ["0", "Check", "", "1"], "echo b false").calls, []))
+})
+
+// The script can only honour what it is told, so the caller is checked as well.
+check("the caller tells the script whether the volume is read-only", () => {
+  const start = serviceSource.indexOf("function runFsAction(")
+  const body = serviceSource.slice(start, serviceSource.indexOf("\n  }", start))
+  assert.match(body, /readOnlyFor\(volume\) \|\| Model\.shouldMountReadOnly\(/)
+  assert.match(body, /label, readOnly \? "1" : "0"\]/)
+})
+
+check("a monitor that dies is not taken for the machine going to sleep", () => inLab(lab => {
+  const list = path.join(lab, "targets")
+  fs.writeFileSync(list, "/dev/sdb1\n")
+  const stub = stubCommands(lab, {
+    gdbus: "echo started >> '" + path.join(lab, "monitors") + "'",
+    "systemd-inhibit": 'while [[ $1 == --* ]]; do shift; done; exec "$@"',
+    // The pause before another try, where the guard is stopped.
+    sleep: 'echo "pause $1" >> \'' + path.join(lab, "pauses") + '\'; kill "$PPID"'
+  })
+  runScript("suspendScript", [list, path.join(lab, "guard"), "0", ""], stub.bin)
+  assert.deepStrictEqual(stub.calls(), [], "drives were unmounted with no sleep signal")
+  assert.strictEqual(fs.readFileSync(path.join(lab, "pauses"), "utf8"), "pause 5\n")
+  assert.strictEqual(fs.readFileSync(path.join(lab, "monitors"), "utf8"), "started\n")
+}))
+
+check("the guard re-arms after the machine wakes", () => inLab(lab => {
+  const list = path.join(lab, "targets")
+  fs.writeFileSync(list, "/dev/sdb1\n")
+  const stub = stubCommands(lab, {
+    gdbus: "for state in true false; do echo \"/org/freedesktop/login1: PrepareForSleep ($state,)\"; done; exec sleep 1",
+    // Stops the guard once the lock has been taken a second time.
+    "systemd-inhibit": `echo armed >> '${path.join(lab, "armed")}'; while [[ $1 == --* ]]; do shift; done; "$@"; ` +
+      `status=$?; [ "$(wc -l < '${path.join(lab, "armed")}')" -lt 2 ] || kill "$PPID"; exit $status`
+  })
+  runScript("suspendScript", [list, path.join(lab, "guard"), "0", ""], stub.bin)
+  assert.deepStrictEqual(stub.calls(), ["unmount -b /dev/sdb1", "unmount -b /dev/sdb1"])
+}))
+
+function formatCall(lab, args) {
+  const log = path.join(lab, "format")
+  const stub = stubCommands(lab, {
+    busctl: 'case "$*" in *ResolveDevice*) echo \'ao 1 "/org/freedesktop/UDisks2/block_devices/sdb1"\' ;; ' +
+      `*) printf '%s\\n' "$@" > '${log}' ;; esac`
+  })
+  const result = runScript("formatScript", ["/dev/sdb1", ...args], stub.bin)
+  assert.strictEqual(result.status, 0, result.stderr)
+  const words = fs.readFileSync(log, "utf8").trimEnd().split("\n")
+  const [fstype, count, ...options] = words.slice(words.indexOf("sa{sv}") + 1)
+  // busctl reads the count and then that many name, type, value triples.
+  assert.strictEqual(options.length, 3 * Number(count), "the option count is wrong: " + words.join(" "))
+  return { fstype, options: options.join(" ") }
+}
+
+check("a format sets the partition type to match the new filesystem", () => {
+  inLab(lab => assert.deepStrictEqual(formatCall(lab, ["exfat", "", "0"]),
+    { fstype: "exfat", options: "take-ownership b true update-partition-type b true" }))
+})
+
+check("a format passes the label as one value and zeroes only when asked", () => {
+  inLab(lab => assert.deepStrictEqual(formatCall(lab, ["ext4", "MY  'STICK' $(id)", "1"]), {
+    fstype: "ext4",
+    options: "take-ownership b true update-partition-type b true label s MY  'STICK' $(id) erase s zero"
+  }))
+})
+
+// Answers the unlock with the given sentence, and keeps what was in the key file.
+function unlockWith(lab, answer, readOnly) {
+  const stub = stubCommands(lab, {
+    udisksctl: `if [ "$1" = unlock ]; then cat "\${@: -1}" > '${path.join(lab, "key")}'; echo '${answer}'; fi`
+  })
+  const result = runScript("unlockScript", ["/dev/sdb1", readOnly], stub.bin, {
+    input: "a pass  phrase\n",
+    env: { ...process.env, PATH: stub.bin + path.delimiter + process.env.PATH, XDG_RUNTIME_DIR: lab }
+  })
+  const left = fs.readdirSync(lab).filter(name => name.endsWith(".key"))
+  assert.deepStrictEqual(left, [], "the key file was left behind")
+  assert.strictEqual(fs.readFileSync(path.join(lab, "key"), "utf8"), "a pass  phrase")
+  return { status: result.status, mounts: stub.calls().filter(call => call.startsWith("mount")) }
+}
+
+check("an unlock mounts the device udisksctl names, dots and all", () => {
+  for (const mapper of ["/dev/dm-0", "/dev/mapper/luks-a.b"]) {
+    inLab(lab => assert.deepStrictEqual(unlockWith(lab, `Unlocked /dev/sdb1 as ${mapper}.`, "0"),
+      { status: 0, mounts: ["mount -b " + mapper] }))
+  }
+  inLab(lab => assert.deepStrictEqual(unlockWith(lab, "Unlocked /dev/sdb1 as /dev/dm-0.", "1"),
+    { status: 0, mounts: ["mount -o ro -b /dev/dm-0"] }))
+})
+
+check("an unlock that names no device mounts nothing rather than a guess", () => {
+  for (const answer of ["", "Unlocked /dev/sdb1", "Error unlocking"]) {
+    inLab(lab => assert.deepStrictEqual(unlockWith(lab, answer, "0"), { status: 1, mounts: [] }))
   }
 })
 

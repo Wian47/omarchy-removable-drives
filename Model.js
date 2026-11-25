@@ -33,8 +33,6 @@ var GLYPH_PHONE = codepoint(0xF011C)     // md-cellphone
 var GLYPH_CAMERA = codepoint(0xF0100)    // md-camera
 var GLYPH_TRASH = codepoint(0xF0A7A)     // md-trash_can_outline
 var GLYPH_PENCIL = codepoint(0xF03EB)    // md-pencil
-var GLYPH_TERMINAL = codepoint(0xF018D)  // md-console
-var GLYPH_COPY = codepoint(0xF018F)      // md-content_copy
 var GLYPH_TAG = codepoint(0xF04F9)       // md-tag
 var GLYPH_STETHOSCOPE = codepoint(0xF04D9) // md-stethoscope
 var GLYPH_WRENCH = codepoint(0xF05B7)    // md-wrench
@@ -122,13 +120,17 @@ var UNMOUNTABLE = ["swap", "LVM2_member", "linux_raid_member", "zfs_member", "dd
 // worth making, so any disk holding one of these is dropped entirely.
 var SYSTEM_MOUNTS = ["/", "/boot", "/boot/efi", "/efi", "/home", "/var", "/usr", "/nix", "/nix/store", "[SWAP]"]
 
+// The boot and replay-protected areas of an eMMC chip are separate disks to the
+// kernel, marked removable like the rest of the chip. They hold firmware.
 function isVirtual(name) {
-  return /^(zram|loop|ram|dm-|md|sr|fd)/.test(String(name || ""))
+  return /^(zram|loop|ram|dm-|md|sr|fd|mmcblk\d+(boot|rpmb))/.test(String(name || ""))
 }
 
 function isCandidateDisk(node) {
   if (!node || node.type !== "disk") return false
   if (isVirtual(node.name)) return false
+  // A card reader with no card in it, or a player that is not sharing its disk.
+  if (!(Number(node.size) > 0)) return false
   return node.rm === true || node.hotplug === true
 }
 
@@ -222,6 +224,14 @@ function isMountable(volume) {
   return UNMOUNTABLE.indexOf(volume.fstype) === -1
 }
 
+function canEverMount(device) {
+  var volumes = (device && device.volumes) || []
+  for (var i = 0; i < volumes.length; i++) {
+    if (volumes[i].mounted || isMountable(volumes[i]) || canUnlock(volumes[i])) return true
+  }
+  return false
+}
+
 function buildDevice(node) {
   var volumes = []
   var kids = node.children || []
@@ -231,8 +241,11 @@ function buildDevice(node) {
   }
 
   if (parts.length === 0) {
-    // A stick formatted without a partition table: the disk *is* the volume.
-    if (clean(node.fstype) !== "" || exact(node.mountpoint) !== "") volumes.push(buildVolume(node, 1))
+    // A stick formatted without a partition table: the disk *is* the volume. So
+    // is a blank one, which has to be on screen before it can be formatted.
+    if (kids.length === 0 || clean(node.fstype) !== "" || exact(node.mountpoint) !== "") {
+      volumes.push(buildVolume(node, 1))
+    }
   } else {
     for (var p = 0; p < parts.length; p++) volumes.push(buildVolume(parts[p], p + 1))
   }
@@ -318,6 +331,13 @@ function unescapeMountPath(value) {
     .replace(/\\([0-7]{3})/g, function(match, octal) {
       return String.fromCharCode(parseInt(octal, 8))
     })
+}
+
+// Lines of `findmnt --poll`, as "mount /dev/sdb1 /run/media/…". Only a block
+// device can be one of these drives; the rest is containers and tmpfs, which
+// come and go constantly on some machines.
+function isDriveMountEvent(line) {
+  return /^\S+ \/dev\//.test(String(line || ""))
 }
 
 function parseMountFlags(raw) {
@@ -645,23 +665,6 @@ function parseSizes(raw) {
 
 // ------------------------------------------------------------- unlocking
 
-// udisksctl answers an unlock with "Unlocked /dev/sdb1 as /dev/dm-0." and the
-// cleartext device is the half that matters: udisks refuses the backing
-// partition for mount and unmount alike — "is not a mountable filesystem" —
-// so every filesystem operation after an unlock has to name the mapper.
-//
-// The trailing period is part of the sentence, not the path, and a mapper name
-// can itself contain one, so it is stripped from the end rather than used as a
-// delimiter.
-function parseUnlockedMapper(raw) {
-  var lines = String(raw === undefined || raw === null ? "" : raw).split("\n")
-  for (var i = 0; i < lines.length; i++) {
-    var match = lines[i].match(/\bas\s+(\/dev\/.+?)\.?\s*$/)
-    if (match) return match[1]
-  }
-  return ""
-}
-
 function canUnlock(volume) {
   return !!(volume && volume.encrypted && !volume.unlocked)
 }
@@ -734,7 +737,10 @@ function autoOpenPolicy(value) {
   return null
 }
 
+// A store of null is a settings file that cannot be read. Which drives it marks
+// read-only is unknown, so none of them is mounted writable on a guess.
 function shouldMountReadOnly(store, device) {
+  if (store === null) return true
   return readOnlyPolicy(driveSettings(store, device).readOnly)
 }
 
@@ -787,7 +793,7 @@ function withDriveSetting(store, device, name, value) {
 // user — but the two that decide how the drive mounts are read through their
 // own policy rather than believed, so a typo cannot reach a mount command.
 function driveRecord(entry) {
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null
+  if (!isRecord(entry)) return null
   var out = {}
   for (var name in entry) {
     if (name !== "readOnly" && name !== "autoOpen") out[name] = entry[name]
@@ -800,22 +806,30 @@ function driveRecord(entry) {
   return out
 }
 
+function isRecord(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+var STORE_UNREADABLE = "The saved drive settings are not valid JSON, so nothing is saved until that is fixed"
+
+// null when the file is not settings at all, which is not the same as having
+// none: an empty answer would be written back over whatever the file holds.
 function parseStore(raw) {
+  var parsed
   try {
-    var parsed = JSON.parse(String(raw || "").replace(/^\s+|\s+$/g, "") || "{}")
-    if (!parsed || typeof parsed !== "object") return { version: 1, drives: {} }
-    var saved = parsed.drives
-    var drives = {}
-    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
-      for (var key in saved) {
-        var record = driveRecord(saved[key])
-        if (record !== null && Object.keys(record).length > 0) drives[key] = record
-      }
-    }
-    return { version: 1, drives: drives }
+    parsed = JSON.parse(String(raw || "").replace(/^\s+|\s+$/g, "") || "{}")
   } catch (e) {
-    return { version: 1, drives: {} }
+    return null
   }
+  if (!isRecord(parsed)) return null
+  var saved = parsed.drives === undefined ? {} : parsed.drives
+  if (!isRecord(saved)) return null
+  var drives = {}
+  for (var key in saved) {
+    var record = driveRecord(saved[key])
+    if (record !== null && Object.keys(record).length > 0) drives[key] = record
+  }
+  return { version: 1, drives: drives }
 }
 
 // --------------------------------------------------------- connect hooks
@@ -909,6 +923,17 @@ function hookState(progress, running) {
     status: said ? said.status : "",
     done: finished
   }
+}
+
+// A hook records its pid a moment after it is launched, and the first poll can
+// get there before it does. Within this long of the launch, an answer that the
+// hook is not running is one that came too early.
+var HOOK_START_GRACE_MS = 3000
+
+function mergeHookState(previous, reported, now) {
+  if (reported.active || !previous || !previous.active) return reported
+  if (previous.startedAt !== undefined && now - previous.startedAt < HOOK_START_GRACE_MS) return previous
+  return reported
 }
 
 // The sibling of activityLabel: what the row says while the hook runs. A hook
@@ -1198,7 +1223,10 @@ function supportHint(support) {
 
   for (var i = 0; i < devices.length; i++) {
     var device = devices[i]
-    if (device.vendor === APPLE_VENDOR && !backends.afc) {
+    var imaging = device.classes.indexOf(IMAGING_CLASS) !== -1
+    // Every iPhone and iPad exposes an imaging interface. Apple's keyboards,
+    // receivers and hubs do not, and there is nothing on them to browse.
+    if (device.vendor === APPLE_VENDOR && imaging && !backends.afc) {
       var apple = describePackages("usbmuxd gvfs-afc gvfs-gphoto2")
       return {
         text: (device.name !== "" ? device.name : "An Apple device") +
@@ -1213,7 +1241,7 @@ function supportHint(support) {
         reconnect: true
       }
     }
-    if (device.classes.indexOf(IMAGING_CLASS) !== -1 && !backends.gphoto2 && !backends.mtp) {
+    if (imaging && !backends.gphoto2 && !backends.mtp) {
       var camera = describePackages("gvfs-gphoto2")
       return {
         text: (device.name !== "" ? device.name : "A camera") + " is connected, but no gvfs backend can read it",
@@ -1245,10 +1273,11 @@ function supportHint(support) {
 // e2label, ntfslabel — and each has its own ceiling. These are libblockdev's
 // numbers, the same ones udisks refuses on, so the field can say "two
 // characters too long" while it is still open rather than after a round trip
-// that unmounted the drive for a write that was never going to land.
+// that unmounted the drive for a write that was never going to land. Btrfs is
+// the exception: libblockdev allows 256, and mkfs.btrfs refuses it.
 var LABEL_LIMITS = {
   vfat: 11, exfat: 11, ext2: 16, ext3: 16, ext4: 16, xfs: 12,
-  ntfs: 128, btrfs: 256, f2fs: 512, nilfs2: 80, udf: 126
+  ntfs: 128, btrfs: 255, f2fs: 512, nilfs2: 80, udf: 126
 }
 
 // The DOS reserved characters, which fatlabel rejects one at a time.
@@ -1257,6 +1286,28 @@ var VFAT_FORBIDDEN = "\"*/:<>?\\|"
 function labelLimit(fstype) {
   var limit = LABEL_LIMITS[clean(fstype)]
   return limit === undefined ? 0 : limit
+}
+
+// What a label costs against that ceiling. Most filesystems count bytes of
+// UTF-8, where anything past ASCII costs two or more. exFAT counts UTF-16 units,
+// which is what a JavaScript string is made of. UDF halves its room as soon as
+// one character does not fit in Latin-1.
+function labelCost(fstype, label) {
+  var i
+  var cost = 0
+  if (fstype === "exfat") return label.length
+  if (fstype === "udf") {
+    for (i = 0; i < label.length; i++) {
+      if (label.charCodeAt(i) > 0xFF) return label.length * 2
+    }
+    return label.length
+  }
+  for (i = 0; i < label.length; i++) {
+    var code = label.charCodeAt(i)
+    // Two for each half of a surrogate pair, which makes four for the pair.
+    cost += code < 0x80 ? 1 : code < 0x800 || (code >= 0xD800 && code <= 0xDFFF) ? 2 : 3
+  }
+  return cost
 }
 
 // Renaming needs a filesystem that is readable and whose tool we know a limit
@@ -1286,12 +1337,18 @@ function validateLabel(volume, label) {
   }
 
   var value = normaliseLabel(label)
-  if (value.length > limit) {
+  var cost = labelCost(fstype, value)
+  if (fstype === "vfat" && /[^\x20-\x7e]/.test(value)) {
+    return { ok: false, label: value, message: fs + " labels can only use plain Latin letters, digits and symbols" }
+  }
+  if (cost > limit) {
     return {
       ok: false,
       label: value,
-      message: fs + " labels are at most " + limit + " characters — that is " +
-               (value.length - limit) + " too many"
+      message: cost === value.length
+        ? fs + " labels are at most " + limit + " characters — that is " + (cost - limit) + " too many"
+        : fs + " labels are at most " + limit + " bytes, and some letters take more than one — that is " +
+          (cost - limit) + " too many"
     }
   }
   if (fstype === "vfat") {
@@ -1312,7 +1369,7 @@ function validateLabel(volume, label) {
 function labelRemaining(volume, label) {
   var limit = volume ? labelLimit(volume.fstype) : 0
   if (limit === 0) return 0
-  return limit - normaliseLabel(label).length
+  return limit - labelCost(clean(volume.fstype), normaliseLabel(label))
 }
 
 // udisks answers "can you fsck this?" itself, and when the answer is no it
@@ -1513,8 +1570,8 @@ function describeRepair(volume, repaired) {
 //
 // The one action here that destroys data on purpose. So it is not a call with
 // four arguments that each get checked somewhere along the way — it is a plan,
-// { fsPath, fstype, label, quick }, approved as a whole before any part of it
-// reaches the bus. The fsPath is in the plan for the same reason a repair
+// { identity, fstype, label, quick }, approved as a whole before any part of it
+// reaches the bus. The identity is in the plan for the same reason a repair
 // carries a UUID: a /dev path is reusable, and a plan made while one stick was
 // in the socket must not run against the one that replaced it.
 
@@ -1542,6 +1599,13 @@ function formatTypes(caps) {
 function formatTarget(fstype) {
   var fs = clean(fstype)
   return { fstype: fs, fstypeLabel: formatFsType(fs), encrypted: false, unlocked: false }
+}
+
+// Which volume this is, as opposed to where it is plugged in. Size is in it for
+// the stick that reports no serial and holds no filesystem to have a UUID.
+function volumeIdentity(device, volume) {
+  if (!device || !volume) return ""
+  return [driveKey(device), exact(volume.fsPath), exact(volume.uuid), volume.sizeBytes].join("\n")
 }
 
 // The pairing the panel drew: this volume is one of the ones on that drive.
@@ -1586,7 +1650,7 @@ function validateFormat(caps, volume, device, plan) {
   var refusal = canFormat(caps, volume, device)
   if (refusal !== null) return { ok: false, reason: refusal }
   if (!plan) return { ok: false, reason: "No format was planned" }
-  if (exact(plan.fsPath) !== exact(volume.fsPath)) {
+  if (exact(plan.identity) !== volumeIdentity(device, volume)) {
     return { ok: false, reason: "That format was planned for a different volume" }
   }
   if (plan.quick !== true && plan.quick !== false) {
@@ -1703,13 +1767,8 @@ function selftestFailed(status) {
   return s === "fatal" || s.indexOf("error") !== -1
 }
 
-// Each line is a property name, the type signature busctl printed, then the
-// value — "SmartTemperature q 306", "SmartFailing b false". The names are what
-// say which interface answered: SmartFailing and SmartPowerOnSeconds are ATA's,
-// SmartCriticalWarning and SmartPowerOnHours are NVMe's, and a drive carrying
-// neither interface answers with nothing at all.
-function parseSmart(raw) {
-  var smart = {
+function noSmart() {
+  return {
     supported: false,
     failing: null,
     temperatureC: null,
@@ -1719,6 +1778,15 @@ function parseSmart(raw) {
     updatedAt: null,
     warnings: null
   }
+}
+
+// Each line is a property name, the type signature busctl printed, then the
+// value — "SmartTemperature q 306", "SmartFailing b false". The names are what
+// say which interface answered: SmartFailing and SmartPowerOnSeconds are ATA's,
+// SmartCriticalWarning and SmartPowerOnHours are NVMe's, and a drive carrying
+// neither interface answers with nothing at all.
+function parseSmart(raw) {
+  var smart = noSmart()
   var lines = String(raw || "").split("\n")
   for (var i = 0; i < lines.length; i++) {
     var match = clean(lines[i]).match(/^(Smart[A-Za-z]+)\s+\S+\s*(.*)$/)
@@ -1741,7 +1809,11 @@ function parseSmart(raw) {
       smart.selftest = clean(value).replace(/"/g, "")
     } else if (name === "SmartUpdated") {
       var at = smartCount(value)
-      smart.updatedAt = at > 0 ? at : null
+      // Zero is udisks saying it has never read this drive, and that nothing
+      // else it reports about its health means anything. A bridge that hides
+      // the drive behind it answers this way, with "not failing" beside it.
+      if (at === 0) return noSmart()
+      smart.updatedAt = at
     } else if (name === "SmartCriticalWarning") {
       // "as 0" when clear, "as 2 \"spare\" \"temperature\"" when not.
       var flags = []

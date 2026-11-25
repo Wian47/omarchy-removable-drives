@@ -41,11 +41,6 @@ Item {
   // someone is looking at it and costs nothing while they are not.
   property bool watchClosely: false
 
-  // Path of the device or volume an action is running against, so exactly one
-  // row can show a spinner instead of the whole panel greying out.
-  property string busyPath: ""
-  property string busyAction: ""
-
   property string lastError: ""
   property string actionStatus: ""
 
@@ -67,7 +62,11 @@ Item {
   readonly property var supportHint: Model.supportHint(support)
 
   // Per-drive settings the user has saved, keyed so they survive replugging.
+  // Keeps the last good copy while the file is unreadable, and is null when
+  // there has not been one.
   property var store: ({ version: 1, drives: {} })
+  property bool storeUnreadable: false
+  property bool _storeLoaded: false
 
   // Mount options per mount point, straight from /proc/mounts — the kernel's
   // own answer to "is this mounted read-only?", which the lsblk tree does not
@@ -111,7 +110,7 @@ Item {
     return false
   }
 
-  readonly property bool busy: actionProcess.running
+  readonly property bool busy: actionProcess.running || longProcess.running
   readonly property int deviceCount: devices.length
   readonly property int mountedCount: {
     var total = 0
@@ -144,13 +143,6 @@ Item {
   // suspends with a backup half-written and expects it there on resume.
   readonly property bool unmountOnSuspend: setting("unmountOnSuspend", false) === true
 
-  property string _successMessage: ""
-
-  // A LUKS passphrase on its way to a process, held only between building the
-  // command and the process starting, and cleared the moment it is written.
-  property string _secret: ""
-  property string _stdout: ""
-  property string _stderr: ""
   property string _openAfterPath: ""
   property var _statSamples: ({})
 
@@ -160,6 +152,9 @@ Item {
   property var _previousDevices: []
   property var _expectedRemovals: ({})
   property bool _seenFirstSnapshot: false
+
+  // Drives that have arrived and whose hook has not run yet, by device path.
+  property var _hooksWaiting: ({})
   property int _quietTicks: 0
 
   // One quiet sample is not enough to call a copy finished: throughput dips to
@@ -258,6 +253,8 @@ Item {
     // every login.
     if (_seenFirstSnapshot) announceChanges(diff)
     _seenFirstSnapshot = true
+    runWaitingHooks()
+    forgetStaleEjects()
 
     if (watchClosely) probeTrash()
     probeCapabilities()
@@ -291,10 +288,11 @@ Item {
     for (i = 0; i < diff.added.length; i++) {
       var added = diff.added[i]
       notify(added.title + " connected", Model.connectedSummary(added), added.glyph)
-      runConnectHook(added)
+      _hooksWaiting[added.path] = true
     }
     for (i = 0; i < diff.removed.length; i++) {
       var gone = diff.removed[i]
+      delete _hooksWaiting[gone.path]
       // We powered this one off ourselves and already said "safe to remove".
       if (_expectedRemovals[gone.path]) {
         var seen = _expectedRemovals
@@ -350,14 +348,9 @@ Item {
     if (pendingEjectPath === "") return
 
     var targets = pendingEjectTargets()
-    if (targets.length === 0) {
-      pendingEjectPath = ""
-      _quietTicks = 0
-      return
-    }
-
     var stillBusy = false
     for (var i = 0; i < targets.length; i++) {
+      if (busyWith(targets[i])) return
       if (isDeviceBusy(targets[i])) stillBusy = true
     }
 
@@ -377,6 +370,17 @@ Item {
     return device ? [device] : []
   }
 
+  // What was asked about one drive must not be applied to the next one to land
+  // on the same path. A held eject goes with its drive, and a drive that is
+  // mounted again is not one that is expected to disappear.
+  function forgetStaleEjects() {
+    if (pendingEjectPath !== "" && pendingEjectTargets().length === 0) cancelPendingEject()
+    if (actionProcess.running && actionProcess.action === "eject") return
+    for (var i = 0; i < devices.length; i++) {
+      if (devices[i].mountedCount > 0) delete _expectedRemovals[devices[i].path]
+    }
+  }
+
   function cancelPendingEject() {
     pendingEjectPath = ""
     _quietTicks = 0
@@ -385,9 +389,37 @@ Item {
 
   // ------------------------------------------------------------- actions
 
+  // Whether something already running has to finish before this drive can be
+  // acted on. Most actions take seconds and simply take turns. A check, a repair
+  // or a format can take hours, so those hold up their own drive and no other.
+  // null asks about something that is not a drive, such as a phone.
+  function busyWith(device) {
+    if (actionProcess.running) return true
+    return longProcess.running && !!device && device.path === longProcess.devicePath
+  }
+
+  function busyWithVolume(volume) {
+    return busyWith(deviceOfVolume(volume))
+  }
+
+  // So exactly one row says it is working instead of the whole panel greying out.
+  function workingOn(path) {
+    return (actionProcess.running && actionProcess.path === path)
+      || (longProcess.running && longProcess.path === path)
+  }
+
   function runAction(command, path, action, successMessage, secret) {
-    if (actionProcess.running) return
-    _secret = secret === undefined || secret === null ? "" : secret
+    start(actionProcess, command, path, action, successMessage, secret)
+  }
+
+  function runLongAction(command, volume, action, successMessage) {
+    var device = deviceOfVolume(volume)
+    longProcess.devicePath = device ? device.path : ""
+    start(longProcess, command, volume.fsPath, action, successMessage)
+  }
+
+  function start(process, command, path, action, successMessage, secret) {
+    if (process.running) return
     lastError = ""
     actionStatus = ""
     blockers = []
@@ -395,13 +427,56 @@ Item {
     checkedFsPath = ""
     checkedUuid = ""
     checkVerdict = null
-    _stdout = ""
-    _stderr = ""
-    _successMessage = successMessage
-    busyPath = path
-    busyAction = action
-    actionProcess.command = command
-    actionProcess.running = true
+    process.secret = secret === undefined || secret === null ? "" : secret
+    process.output = ""
+    process.errors = ""
+    process.successMessage = successMessage
+    process.path = path
+    process.action = action
+    process.command = command
+    process.running = true
+  }
+
+  function finishAction(process, exitCode) {
+    var action = process.action
+
+    // The work itself landed either way; the remount is what separates these.
+    // A filesystem that was renamed and then failed to mount back is still
+    // renamed, so the verdict and the success message stand — but the drive
+    // is gone from the file manager, and that is the part worth shouting.
+    if (exitCode === 0 || exitCode === Model.EXIT_REMOUNT_FAILED) {
+      // Left by a quicker action that failed while this one was running.
+      lastError = ""
+      actionStatus = process.successMessage
+      if (action === "eject") {
+        notify("Safe to remove", process.successMessage.replace(/^Safe to remove /, ""), Model.GLYPH_EJECT)
+      }
+      // Worth a notification of its own: a full erase runs long enough that
+      // the panel is usually shut by the time it finishes.
+      if (action === "format") {
+        notify("Formatted", process.successMessage.replace(/^Formatted /, ""), Model.GLYPH_ERASER)
+      }
+      if (action === "check" || action === "repair") applyVerdict(action, process.path, process.output)
+      if (exitCode === Model.EXIT_REMOUNT_FAILED) {
+        lastError = Model.remountWarning(actionStatus)
+        actionStatus = ""
+        notify("Left unmounted", lastError, Model.GLYPH_ALERT, "normal")
+      }
+    } else {
+      if (action === "mount") _openAfterPath = ""
+      var detail = Model.formatError(process.errors)
+      lastError = detail !== "" ? detail : (action + " failed")
+      // "Target is busy" is only half an answer; go find the other half.
+      if (/busy/i.test(lastError)) {
+        blockedFsPath = ""
+        probeBlockers(mountedPathsFor(process.path))
+      }
+      notify("Removable drives", lastError, Model.GLYPH_ALERT, "normal")
+    }
+    refresh()
+    // A phone mount changes gvfs state, which lsblk knows nothing about.
+    if (action === "mount-portable" || action === "unmount-portable") refreshPortables()
+    if (watchClosely) probeTrash()
   }
 
   // The drive gets the last word on both halves of this. A drive saved as
@@ -409,7 +484,7 @@ Item {
   // decides whether a file manager follows — `openAfter` is the global default
   // the caller came with, not the answer.
   function mount(volume, openAfter) {
-    if (!volume || !Model.isMountable(volume) || busy) return
+    if (!volume || !Model.isMountable(volume) || busyWithVolume(volume)) return
     var device = deviceOfVolume(volume)
     var readOnly = Model.shouldMountReadOnly(store, device)
     _openAfterPath = Model.shouldOpenOnMount(store, device, openAfter === true) ? volume.fsPath : ""
@@ -421,7 +496,7 @@ Item {
   }
 
   function unmount(volume, force) {
-    if (!volume || !volume.mounted || busy) return
+    if (!volume || !volume.mounted || busyWithVolume(volume)) return
     _openAfterPath = ""
     var command = ["udisksctl", "unmount", "--no-user-interaction", "-b", volume.fsPath]
     if (force) command.push("--force")
@@ -442,7 +517,7 @@ Item {
   // it back writable.
   function mountReadOnly(volume) {
     if (!volume) return "unknown volume"
-    if (busy) return refuse("Another action is still running")
+    if (busyWithVolume(volume)) return refuse("Another action is still running")
     if (volume.encrypted && !volume.unlocked) return refuse("Unlock this volume first")
     if (volume.mounted && readOnlyFor(volume)) {
       actionStatus = volume.title + " is already mounted read-only"
@@ -468,7 +543,6 @@ Item {
   function toggleMount(volume, openAfter) {
     if (!volume) return
     if (volume.mounted) unmount(volume, false)
-    else if (volume.encrypted && !volume.unlocked) unlock(volume)
     else mount(volume, openAfter)
   }
 
@@ -487,9 +561,11 @@ Item {
   // runs, and a passphrase in argv is a passphrase in `ps`.
   //
   // udisks refuses the backing partition for mount and unmount alike, so the
-  // mount that follows targets the mapper udisksctl names on its way out —
-  // and honours the drive's own read-only setting, because the container is
-  // the third way a filesystem on it can come up.
+  // mount that follows targets the mapper udisksctl names on its way out, in
+  // "Unlocked /dev/sdb1 as /dev/dm-0." The period ends the sentence and can also
+  // be in the name, so one is dropped from the end. The mount honours the drive's
+  // own read-only setting, because the container is the third way a filesystem on
+  // it can come up.
   readonly property string unlockScript: [
     'set -u',
     'dev=$1',
@@ -517,7 +593,7 @@ Item {
 
   function unlock(volume, passphrase) {
     if (!Model.canUnlock(volume)) return "This volume is not locked"
-    if (busy) return refuse("Another action is still running")
+    if (busyWithVolume(volume)) return refuse("Another action is still running")
     if (String(passphrase || "") === "") return refuse("Enter the passphrase first")
     var readOnly = Model.shouldMountReadOnly(store, deviceOfVolume(volume))
     runAction(["bash", "-c", unlockScript, "removable-drives", volume.path, readOnly ? "1" : "0"],
@@ -533,7 +609,7 @@ Item {
   // partition can be locked.
   function lock(volume) {
     if (!volume) return "unknown volume"
-    if (busy) return refuse("Another action is still running")
+    if (busyWithVolume(volume)) return refuse("Another action is still running")
     if (!Model.canLock(volume)) return refuse("This volume is not unlocked")
     var blocked = fsActionBlocked(volume)
     if (blocked !== "") return refuse(blocked)
@@ -552,45 +628,73 @@ Item {
   // this widget exists to prevent, so the request is held rather than refused
   // and runs by itself the moment the drive goes quiet.
   function eject(device) {
-    if (!device || busy) return
+    if (!device) return "unknown device"
+    if (busyWith(device)) return refuse("Another action is still running")
     if (isDeviceBusy(device)) {
       pendingEjectPath = device.path
       _quietTicks = 0
       actionStatus = "Waiting for writes to finish on " + device.title + "…"
-      return
+    } else {
+      runEject([device])
     }
-    runEject([device])
+    return "ok"
   }
 
   function ejectAll() {
-    if (busy || devices.length === 0) return
+    if (devices.length === 0) return "no drives attached"
+    if (busy) return refuse("Another action is still running")
     if (anyBusy) {
       pendingEjectPath = "*"
       _quietTicks = 0
       actionStatus = "Waiting for writes to finish…"
-      return
+    } else {
+      runEject(devices)
     }
-    runEject(devices)
+    return "ok"
   }
 
   // Unmount everything, re-lock anything that was unlocked, then cut power.
   // `set -e` stops at the first failure so a busy filesystem surfaces as an
   // error instead of a half-ejected drive, and power-off is allowed to fail
-  // on hubs and card readers that don't implement it — by then the drive is
-  // already safe to pull.
+  // on hubs and card readers that don't implement it.
+  //
+  // That allowance also hides udisks refusing to power off a mounted drive,
+  // and the unmounts come from a snapshot that misses whatever was mounted
+  // after it was taken. So the kernel is asked before the failure is ignored.
+  // A device that is already gone has nothing left to ask about: the other
+  // slot of the same card reader may have been powered off just before it.
+  readonly property string ejectScript: [
+    'set -eu',
+    'while [ $# -gt 0 ]; do',
+    '  if [ "$1" = power-off ]; then',
+    '    if [ -e "$2" ]; then',
+    '      mounts=$(lsblk -nro MOUNTPOINT "$2")',
+    '      if [ -n "$mounts" ]; then',
+    '        echo "$2 still has a mounted volume and was not powered off" >&2',
+    '        exit 1',
+    '      fi',
+    '    fi',
+    '    udisksctl power-off --no-user-interaction -b "$2" || true',
+    '  else',
+    '    udisksctl "$1" --no-user-interaction -b "$2"',
+    '  fi',
+    '  shift 2',
+    'done'
+  ].join("\n")
+
   function runEject(list) {
-    if (!list || list.length === 0 || busy) return
-    var script = "set -e\n"
+    if (!list || list.length === 0) return
+    var command = ["bash", "-c", ejectScript, "removable-drives"]
     var titles = []
     for (var d = 0; d < list.length; d++) {
       var device = list[d]
       titles.push(device.title)
       for (var v = 0; v < device.volumes.length; v++) {
         var volume = device.volumes[v]
-        if (volume.mounted) script += "udisksctl unmount --no-user-interaction -b " + quote(volume.fsPath) + "\n"
-        if (volume.encrypted && volume.unlocked) script += "udisksctl lock --no-user-interaction -b " + quote(volume.path) + "\n"
+        if (volume.mounted) command.push("unmount", volume.fsPath)
+        if (volume.encrypted && volume.unlocked) command.push("lock", volume.path)
       }
-      script += "udisksctl power-off --no-user-interaction -b " + quote(device.path) + " || true\n"
+      command.push("power-off", device.path)
 
       // Remember that this one is meant to disappear, so its removal is not
       // reported back to the user as an accident.
@@ -598,7 +702,7 @@ Item {
       expected[device.path] = true
       _expectedRemovals = expected
     }
-    runAction(["bash", "-c", script], list.length === 1 ? list[0].path : "*", "eject",
+    runAction(command, list.length === 1 ? list[0].path : "*", "eject",
               "Safe to remove " + titles.join(", "))
   }
 
@@ -634,7 +738,9 @@ Item {
   readonly property string suspendTargetsPath:
     Quickshell.env("HOME") + "/.local/state/omarchy/removable-drives-suspend"
 
-  property string _suspendSignature: ""
+  // null rather than "", so the list left by the last session is replaced even
+  // when nothing is mounted yet.
+  property var _suspendSignature: null
 
   // The guard is a shell loop rather than QML because the unmounting has to
   // finish while the lock is still held; a Process started from here would
@@ -677,14 +783,21 @@ Item {
     '  exit 0',
     '}',
     'trap cleanup EXIT INT TERM HUP',
+    // Fails when the monitor ends without the signal. That is gdbus dying, not
+    // the machine going to sleep, and must not be acted on as if it were.
     'wait_for_sleep_signal() {',
-    '  coproc MONITOR { gdbus monitor --system --dest org.freedesktop.login1' +
-      ' --object-path /org/freedesktop/login1; }',
-    '  while IFS= read -r line <&"${MONITOR[0]}"; do',
-    '    case "$line" in *"PrepareForSleep ($1,)"*) break ;; esac',
+    '  local seen=1 events line',
+    '  exec {events}< <(exec gdbus monitor --system --dest org.freedesktop.login1' +
+      ' --object-path /org/freedesktop/login1)',
+    '  MONITOR_PID=$!',
+    '  while IFS= read -r line <&"$events"; do',
+    '    case "$line" in *"PrepareForSleep ($1,)"*) seen=0; break ;; esac',
     '  done',
+    '  exec {events}<&-',
     '  kill "$MONITOR_PID" 2>/dev/null',
     '  wait "$MONITOR_PID" 2>/dev/null',
+    '  MONITOR_PID=""',
+    '  return "$seen"',
     '}',
     // A drive that refused to unmount is the whole reason this exists, so it
     // is the one outcome that must not pass in silence. Sleeping while
@@ -718,15 +831,24 @@ Item {
     '  # shellcheck disable=SC2016',
     '  setsid systemd-inhibit --what=sleep --mode=delay --who="Removable Drives"' +
       ' --why="Unmounting removable drives" \\',
-    "    bash -c 'wait_for_sleep_signal true; unmount_targets \"$1\" \"$2\" \"$3\"'" +
+    "    bash -c 'wait_for_sleep_signal true && unmount_targets \"$1\" \"$2\" \"$3\"'" +
       ' removable-drives "$targets" "$notify" "$glyph" &',
     '  inhibit_pid=$!',
     '  printf %s "$inhibit_pid" > "$guardfile"',
     '  wait "$inhibit_pid"',
+    '  slept=$?',
     '  inhibit_pid=""',
-    '  wait_for_sleep_signal false',
+    // Nothing slept, so there is no resume to wait for. The pause is what keeps
+    // a monitor that will not start from being restarted in a tight loop.
+    '  if [ "$slept" != 0 ]; then sleep 5; continue; fi',
+    '  wait_for_sleep_signal false || sleep 5',
     'done'
   ].join("\n")
+
+  // The trailing newline is required: the sleep guard reads line by line, and
+  // `read` drops a last line that does not end in one.
+  readonly property string writeFileScript:
+    'mkdir -p "$(dirname "$2")" && printf "%s\\n" "$1" > "$2"'
 
   // Rewritten only when the mounted set changes, so a drive appearing or going
   // quiet does not cost a write.
@@ -735,8 +857,7 @@ Item {
     var text = Model.suspendTargets(devices).join("\n")
     if (text === _suspendSignature) return
     _suspendSignature = text
-    suspendWriter.command = ["bash", "-c",
-                             'mkdir -p "$(dirname "$2")" && printf %s "$1" > "$2"',
+    suspendWriter.command = ["bash", "-c", writeFileScript,
                              "removable-drives", text, suspendTargetsPath]
     suspendWriter.running = true
   }
@@ -745,22 +866,35 @@ Item {
 
   readonly property string storePath: Quickshell.env("HOME") + "/.local/state/omarchy/removable-drives.json"
 
+  function loadStore(raw) {
+    var parsed = Model.parseStore(raw)
+    storeUnreadable = parsed === null
+    if (storeUnreadable) {
+      if (!_storeLoaded) store = null
+      lastError = Model.STORE_UNREADABLE
+      return
+    }
+    _storeLoaded = true
+    store = parsed
+    if (lastError === Model.STORE_UNREADABLE) lastError = ""
+  }
+
   function saveDriveSetting(device, name, value) {
-    if (!device) return
+    if (!device) return "unknown device"
+    if (storeUnreadable) return refuse(Model.STORE_UNREADABLE)
     var next = Model.withDriveSetting(store, device, name, value)
     store = next
-    storeWriter.command = ["bash", "-c",
-                           'mkdir -p "$(dirname "$2")" && printf %s "$1" > "$2"',
-                           "removable-drives", JSON.stringify(next), storePath]
-    storeWriter.running = true
+    storeFile.setText(JSON.stringify(next) + "\n")
     // Re-apply immediately so the panel renames without waiting for lsblk.
-    var applied = devices.slice()
+    // Copied, because a row only notices a drive that is a different object.
+    var applied = JSON.parse(JSON.stringify(devices))
     Model.applyStore(applied, next)
     devices = applied
+    return "ok"
   }
 
   function setNickname(device, nickname) {
-    saveDriveSetting(device, "nickname", String(nickname || "").replace(/^\s+|\s+$/g, ""))
+    return saveDriveSetting(device, "nickname", String(nickname || "").replace(/^\s+|\s+$/g, ""))
   }
 
   // Both save null rather than false for the off position, so turning a
@@ -821,6 +955,19 @@ Item {
     'printf %s "$$" > "$file.pid"',
     'bash -c "$5" removable-drives "$3" "$4" "$file"'
   ].join("\n")
+
+  // A drive is announced before anything has had time to mount it, and a hook
+  // handed an empty mount point would work on "/" instead of the drive. So it
+  // waits for one, unless nothing on the drive could ever provide it.
+  function runWaitingHooks() {
+    for (var i = 0; i < devices.length; i++) {
+      var device = devices[i]
+      if (!_hooksWaiting[device.path]) continue
+      if (mountpointOf(device) === "" && Model.canEverMount(device)) continue
+      delete _hooksWaiting[device.path]
+      runConnectHook(device)
+    }
+  }
 
   function runConnectHook(device) {
     var command = String(driveSetting(device, "onConnect", "")).replace(/^\s+|\s+$/g, "")
@@ -902,7 +1049,7 @@ Item {
     var next = {}
     for (var i = 0; i < live.length; i++) {
       var name = live[i]
-      if (report[name] !== undefined) next[name] = report[name]
+      if (report[name] !== undefined) next[name] = Model.mergeHookState(hooks[name], report[name], Date.now())
       else if (hooks[name] !== undefined) next[name] = hooks[name]
     }
     hooks = next
@@ -916,7 +1063,7 @@ Item {
   function markHookStarted(name) {
     var next = {}
     for (var key in hooks) next[key] = hooks[key]
-    next[name] = { active: true, percent: null, status: "", done: false }
+    next[name] = { active: true, percent: null, status: "", done: false, startedAt: Date.now() }
     hooks = next
   }
 
@@ -955,6 +1102,25 @@ Item {
 
   // -------------------------------------------------------------- trash
 
+  // A filesystem that supports symlinks can point .Trash at any directory, and
+  // neither du nor rm stops at a link in the middle of a path. Anything that
+  // does not resolve to itself is not this drive's trash.
+  readonly property string trashProbeScript: [
+    'for path; do',
+    '  [ "$(realpath -e -- "$path" 2>/dev/null)" = "$path" ] || continue',
+    '  du -sb -- "$path"',
+    'done'
+  ].join("\n")
+
+  readonly property string trashEmptyScript: [
+    // -m, so a trash emptied elsewhere in the meantime is not called a symlink.
+    'if [ "$(realpath -m -- "$1" 2>/dev/null)" != "$1" ]; then',
+    '  echo "Refusing to empty a trash folder that is a symlink" >&2',
+    '  exit 1',
+    'fi',
+    'rm -rf -- "$1"'
+  ].join("\n")
+
   function mountedMountpoints() {
     var out = []
     for (var d = 0; d < devices.length; d++) {
@@ -972,7 +1138,7 @@ Item {
       trashSizes = ({})
       return
     }
-    var command = ["du", "-sb", "--"]
+    var command = ["bash", "-c", trashProbeScript, "removable-drives"]
     for (var i = 0; i < mounts.length; i++) {
       var candidates = Model.trashCandidates(mounts[i], uid)
       for (var c = 0; c < candidates.length; c++) command.push(candidates[c])
@@ -1004,13 +1170,13 @@ Item {
   // and matched exactly rather than trusted from the caller.
   function emptyTrash(volume) {
     var path = trashPathFor(volume)
-    if (path === "" || busy) return
+    if (path === "" || busyWithVolume(volume)) return
     if (!Model.isSafeTrashPath(path, mountedMountpoints(), uid)) {
       lastError = "Refusing to empty an unrecognised trash path"
       return
     }
-    runAction(["rm", "-rf", "--", path], volume.fsPath, "trash",
-              "Emptied trash on " + volume.title)
+    runAction(["bash", "-c", trashEmptyScript, "removable-drives", path],
+              volume.fsPath, "trash", "Emptied trash on " + volume.title)
   }
 
   // ------------------------------------------- labels and integrity
@@ -1027,6 +1193,9 @@ Item {
   // it back. The mount is restored whether or not the middle step worked — a
   // rename udisks refused should not also leave the drive unmounted.
   //
+  // It goes back read-only if it was, if the drive is saved as read-only, or if
+  // the fsck just found errors that writing could make worse.
+  //
   // The object path is asked for rather than built. udisks escapes the kernel
   // name into it, so an unlocked LUKS volume at /dev/mapper/backup is
   // .../block_devices/dm_2d3, and a plugin guessing at that encoding would
@@ -1041,6 +1210,7 @@ Item {
     'remount=$2',
     'method=$3',
     'label=${4-}',
+    'ro=${5-0}',
     'raw=$(busctl call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager' +
       ' org.freedesktop.UDisks2.Manager ResolveDevice "a{sv}a{sv}" 1 path s "$dev" 0) || exit 1',
     // The path is the last field and arrives wrapped in quotes. Trimming from
@@ -1062,8 +1232,10 @@ Item {
     // An fsck has no useful upper bound — a big NTFS volume can take an hour —
     // so the bus timeout is a day rather than busctl's default 25 seconds,
     // which would abandon the call while the tool was still working.
-    '  busctl --timeout=86400 call org.freedesktop.UDisks2 "$obj"' +
-      ' org.freedesktop.UDisks2.Filesystem "$method" "a{sv}" 0 || rc=$?',
+    '  verdict=$(busctl --timeout=86400 call org.freedesktop.UDisks2 "$obj"' +
+      ' org.freedesktop.UDisks2.Filesystem "$method" "a{sv}" 0) || rc=$?',
+    '  printf "%s\\n" "$verdict"',
+    '  if [ "$verdict" = "b false" ]; then ro=1; fi',
     'fi',
     // Putting the filesystem back can fail on its own — the drive was renamed
     // or repaired and is now sitting unmounted. Swallowing that reported the
@@ -1071,7 +1243,11 @@ Item {
     // comes back as its own exit code when nothing else went wrong, and as an
     // extra line on stderr when something did.
     'remount_rc=0',
-    'if [ "$remount" = 1 ]; then udisksctl mount --no-user-interaction -b "$dev" >/dev/null || remount_rc=$?; fi',
+    'if [ "$remount" = 1 ]; then',
+    '  set -- mount --no-user-interaction -b "$dev"',
+    '  if [ "$ro" = 1 ]; then set -- "$@" -o ro; fi',
+    '  udisksctl "$@" >/dev/null || remount_rc=$?',
+    'fi',
     'if [ "$remount_rc" != 0 ]; then',
     '  echo "the filesystem could not be mounted again" >&2',
     '  if [ "$rc" = 0 ]; then rc=75; fi',
@@ -1141,9 +1317,11 @@ Item {
   }
 
   function runFsAction(volume, method, label, action, successMessage) {
-    runAction(["bash", "-c", fsScript, "removable-drives",
-               volume.fsPath, volume.mounted ? "1" : "0", method, label],
-              volume.fsPath, action, successMessage)
+    var readOnly = readOnlyFor(volume) || Model.shouldMountReadOnly(store, deviceOfVolume(volume))
+    var command = ["bash", "-c", fsScript, "removable-drives",
+                   volume.fsPath, volume.mounted ? "1" : "0", method, label, readOnly ? "1" : "0"]
+    if (method === "SetLabel") runAction(command, volume.fsPath, action, successMessage)
+    else runLongAction(command, volume, action, successMessage)
   }
 
   // These three answer with "ok" or with the reason they did not run, so a
@@ -1165,7 +1343,7 @@ Item {
 
   function setVolumeLabel(volume, label) {
     if (!volume) return "unknown volume"
-    if (busy) return refuse("Another action is still running")
+    if (busyWithVolume(volume)) return refuse("Another action is still running")
     if (!Model.canRelabel(volume)) {
       return refuse(describeFs(volume) + " cannot be renamed from here")
     }
@@ -1248,8 +1426,10 @@ Item {
     '  /org/freedesktop/UDisks2/block_devices/*) ;;',
     '  *) echo "udisks does not recognise $dev" >&2; exit 1 ;;',
     'esac',
-    'count=1',
-    'set -- take-ownership b true',
+    // Without the second option a partition keeps the type of what was on it,
+    // and Windows gives no drive letter to exFAT on one marked as Linux.
+    'count=2',
+    'set -- take-ownership b true update-partition-type b true',
     'if [ -n "$label" ]; then count=$((count + 1)); set -- "$@" label s "$label"; fi',
     'if [ "$erase" = 1 ]; then count=$((count + 1)); set -- "$@" erase s zero; fi',
     // Zeroing a drive has no useful upper bound and neither does laying down a
@@ -1263,17 +1443,21 @@ Item {
   // back as the sentence the panel would have shown, so a script calling this
   // over IPC learns why nothing happened — and the plan is validated whole,
   // against the volume it names, before a byte of it reaches the bus.
-  function formatVolume(volume, fstype, label, quick) {
+  //
+  // `identity` is the volume the plan was made for. A call that names the
+  // volume and runs at once has nothing to compare it with, and leaves it out.
+  function formatVolume(volume, fstype, label, quick, identity) {
     if (!volume) return "unknown volume"
     if (busy) return refuse("Another action is still running")
 
+    var device = deviceOfVolume(volume)
     var plan = {
-      fsPath: volume.fsPath,
+      identity: identity === undefined ? Model.volumeIdentity(device, volume) : identity,
       fstype: Model.clean(fstype),
       label: Model.normaliseLabel(label),
       quick: quick !== false
     }
-    var checked = Model.validateFormat(fsCapabilities, volume, deviceOfVolume(volume), plan)
+    var checked = Model.validateFormat(fsCapabilities, volume, device, plan)
     if (!checked.ok) return refuse(checked.reason)
 
     var blocked = fsActionBlocked(volume)
@@ -1282,10 +1466,10 @@ Item {
     // Nothing is opened afterwards, and nothing is mounted back. Somebody who
     // has just erased a disk wants to see the empty volume in the panel, not a
     // file manager opening over it.
-    _openAfterPath = ""
-    runAction(["bash", "-c", formatScript, "removable-drives",
-               plan.fsPath, plan.fstype, plan.label, plan.quick ? "0" : "1"],
-              plan.fsPath, "format", Model.describeFormat(volume, plan.fstype))
+    if (_openAfterPath === volume.fsPath) _openAfterPath = ""
+    runLongAction(["bash", "-c", formatScript, "removable-drives",
+                   volume.fsPath, plan.fstype, plan.label, plan.quick ? "0" : "1"],
+                  volume, "format", Model.describeFormat(volume, plan.fstype))
     return "ok"
   }
 
@@ -1301,9 +1485,9 @@ Item {
   // Check exits 0 whether or not it liked what it found, so the verdict is on
   // stdout rather than in the exit code, and a filesystem that failed its
   // check is a result to report rather than an error to raise.
-  function applyVerdict(action, fsPath) {
+  function applyVerdict(action, fsPath, output) {
     var volume = volumeByPath(fsPath)
-    var verdict = Model.parseFsVerdict(_stdout)
+    var verdict = Model.parseFsVerdict(output)
     var name = volume ? volume.title : "A drive"
 
     if (action === "check") {
@@ -1471,12 +1655,12 @@ Item {
   }
 
   function mountPortable(entry) {
-    if (!entry || entry.uri === "" || busy) return
+    if (!entry || entry.uri === "" || busyWith(null)) return
     runAction(["gio", "mount", entry.uri], entry.uri, "mount-portable", "Mounted " + entry.name)
   }
 
   function unmountPortable(entry) {
-    if (!entry || entry.uri === "" || busy) return
+    if (!entry || entry.uri === "" || busyWith(null)) return
     runAction(["gio", "mount", "-u", entry.uri], entry.uri, "unmount-portable", "Unmounted " + entry.name)
   }
 
@@ -1561,7 +1745,7 @@ Item {
   Process {
     id: lsblkProcess
     command: ["lsblk", "-J", "-b", "-o",
-              "NAME,PATH,LABEL,PARTLABEL,FSTYPE,SIZE,FSSIZE,FSAVAIL,FSUSED,MOUNTPOINT,RM,HOTPLUG,TYPE,TRAN,VENDOR,MODEL,UUID,SERIAL"]
+              "NAME,PATH,LABEL,PARTLABEL,FSTYPE,SIZE,FSSIZE,FSAVAIL,FSUSED,MOUNTPOINT,MOUNTPOINTS,RM,HOTPLUG,TYPE,TRAN,VENDOR,MODEL,UUID,SERIAL"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applySnapshot(text)
@@ -1604,63 +1788,42 @@ Item {
     }
   }
 
-  Process {
-    id: actionProcess
+  component Action: Process {
+    id: process
+
+    property string path: ""
+    property string devicePath: ""
+    property string action: ""
+    property string successMessage: ""
+    property string output: ""
+    property string errors: ""
+
+    // A LUKS passphrase on its way to the script, held only between building the
+    // command and the process starting, and cleared the moment it is written.
+    property string secret: ""
+
     // Only the unlock script ever reads stdin; for everything else the pipe is
     // opened and never written, which no command here notices.
     stdinEnabled: true
     onStarted: {
-      if (root._secret !== "") {
-        write(root._secret + "\n")
-        root._secret = ""
+      if (process.secret !== "") {
+        write(process.secret + "\n")
+        process.secret = ""
       }
     }
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root._stdout = text }
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: root._stderr = text }
-    onExited: function(exitCode) {
-      var action = root.busyAction
-      var path = root.busyPath
-      root.busyPath = ""
-      root.busyAction = ""
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: process.output = text }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: process.errors = text }
+    onExited: function(exitCode) { root.finishAction(process, exitCode) }
+  }
 
-      // The work itself landed either way; the remount is what separates these.
-      // A filesystem that was renamed and then failed to mount back is still
-      // renamed, so the verdict and the success message stand — but the drive
-      // is gone from the file manager, and that is the part worth shouting.
-      if (exitCode === 0 || exitCode === Model.EXIT_REMOUNT_FAILED) {
-        root.actionStatus = root._successMessage
-        if (action === "eject") {
-          root.notify("Safe to remove",
-                      root._successMessage.replace(/^Safe to remove /, ""),
-                      Model.GLYPH_EJECT)
-        }
-        // Worth a notification of its own: a full erase runs long enough that
-        // the panel is usually shut by the time it finishes.
-        if (action === "format") {
-          root.notify("Formatted", root._successMessage.replace(/^Formatted /, ""), Model.GLYPH_ERASER)
-        }
-        if (action === "check" || action === "repair") root.applyVerdict(action, path)
-        if (exitCode === Model.EXIT_REMOUNT_FAILED) {
-          root.lastError = Model.remountWarning(root.actionStatus)
-          root.actionStatus = ""
-          root.notify("Left unmounted", root.lastError, Model.GLYPH_ALERT, "normal")
-        }
-      } else {
-        root._openAfterPath = ""
-        var detail = Model.formatError(root._stderr)
-        root.lastError = detail !== "" ? detail : (action + " failed")
-        // "Target is busy" is only half an answer; go find the other half.
-        if (/busy/i.test(root.lastError)) {
-          root.blockedFsPath = ""
-          root.probeBlockers(root.mountedPathsFor(path))
-        }
-        root.notify("Removable drives", root.lastError, Model.GLYPH_ALERT, "normal")
-      }
-      root.refresh()
-      // A phone mount changes gvfs state, which lsblk knows nothing about.
-      if (action === "mount-portable" || action === "unmount-portable") root.refreshPortables()
-      if (root.watchClosely) root.probeTrash()
-    }
+  Action {
+    id: actionProcess
+  }
+
+  // A check, a repair or a format, so that hours of one do not stop every other
+  // drive from being mounted or ejected.
+  Action {
+    id: longProcess
   }
 
   Process {
@@ -1715,16 +1878,11 @@ Item {
 
   Process {
     id: trashProcess
-    // Most candidates do not exist; du complains about those on stderr and
-    // still reports the ones that do, so a non-zero exit is expected here.
+    // Most candidates do not exist, so a non-zero exit is expected here.
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.trashSizes = Model.parseSizes(text)
     }
-  }
-
-  Process {
-    id: storeWriter
   }
 
   Process {
@@ -1744,9 +1902,12 @@ Item {
     path: root.storePath
     watchChanges: true
     printErrors: false
-    onLoaded: root.store = Model.parseStore(text())
+    onLoaded: root.loadStore(text())
     onFileChanged: reload()
-    onLoadFailed: root.store = ({ version: 1, drives: {} })
+    onLoadFailed: function(error) {
+      root.loadStore(error === FileViewError.FileNotFound ? "" : "unreadable")
+    }
+    onSaveFailed: root.lastError = "Could not save " + root.storePath
   }
 
   // udev tells us the moment a device appears or disappears, which is the
@@ -1760,6 +1921,20 @@ Item {
     stdout: SplitParser {
       onRead: function(line) {
         if (/(add|remove|change|bind|unbind)/.test(String(line))) debounce.restart()
+      }
+    }
+    onExited: monitorRestart.restart()
+  }
+
+  // udev says nothing when a filesystem is mounted or unmounted, and most of
+  // that is done by something else: an automounter, a file manager, a terminal.
+  Process {
+    id: mountMonitor
+    command: ["stdbuf", "-oL", "findmnt", "--poll", "-rno", "ACTION,SOURCE"]
+    running: true
+    stdout: SplitParser {
+      onRead: function(line) {
+        if (Model.isDriveMountEvent(line)) debounce.restart()
       }
     }
     onExited: monitorRestart.restart()
@@ -1788,7 +1963,10 @@ Item {
   Timer {
     id: monitorRestart
     interval: 3000
-    onTriggered: if (!monitorProcess.running) monitorProcess.running = true
+    onTriggered: {
+      monitorProcess.running = true
+      mountMonitor.running = true
+    }
   }
 
   // I/O counters are only sampled while something removable is attached, so
@@ -1817,8 +1995,8 @@ Item {
     }
   }
 
-  // Backstop for a machine where udevadm is unavailable or its stream dies
-  // quietly: never more than a minute stale.
+  // Backstop for a machine where either monitor is unavailable or its stream
+  // dies quietly: never more than a minute stale.
   Timer {
     interval: 60000
     running: true

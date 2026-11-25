@@ -110,11 +110,12 @@ const qmlformat = ["qmlformat", "/usr/lib/qt6/bin/qmlformat"].find(candidate => 
   }
 })
 
-// qmlformat, for the reason the CI workflow gives at length: qmllint resolves
-// types, every Quickshell and `qs.*` type here lives in Omarchy's shell, and a
-// check that passes only on a machine with the shell installed answers a
-// different question everywhere else. qmlformat resolves nothing and parses
-// the grammar, so it gives one answer. It reports through its exit code.
+// qmlformat rather than qmllint, which was the obvious choice and the wrong one.
+// qmllint resolves types, and every Quickshell and `qs.*` type here lives in
+// Omarchy's shell, which no CI runner has. A check that passes only on a machine
+// with the shell installed answers a different question everywhere else.
+// qmlformat resolves nothing and parses the grammar, so it gives one answer. It
+// reports through its exit code, and says nothing about a file it cannot parse.
 check("Panel.qml and Service.qml parse", () => {
   if (!qmlformat) return ["qmlformat not found, install the Qt QML tools to run this check"]
   return ["Panel.qml", "Service.qml"].filter(file => {
@@ -133,6 +134,15 @@ check("every Model function the QML calls exists", () => {
     [...referenced(source, "Model")]
       .filter(([called]) => !declared.has(called))
       .map(([called, line]) => `${name}:${line}: Model.${called} is not declared in Model.js`))
+})
+
+check("everything Model.js declares is used by something other than its tests", () => {
+  const code = modelSource.split("\n").map(stripComment).join("\n")
+  const qml = serviceSource + panelSource
+  return [...declaredIn(modelSource)].filter(name => {
+    const mentions = code.match(new RegExp("(?<![\\w$])" + name.replace(/\$/g, "\\$") + "(?![\\w$])", "g")).length
+    return mentions < 2 && !new RegExp("\\bModel\\." + name + "\\b").test(qml)
+  }).map(name => `Model.js declares ${name}, and nothing uses it`)
 })
 
 // Panel.qml reaches the service through `drives`. A property renamed in
@@ -196,6 +206,40 @@ check("no device path reaches a shell command unquoted", () => {
   return problems
 })
 
+// udev does not report a mount, so a drive mounted by anything else stays
+// unmounted in the panel until a timer notices.
+check("the service follows mounts as well as devices", () => {
+  const monitors = [...serviceSource.matchAll(/^  Process \{\n    id: (\w+)\n[\s\S]*?^  \}/gm)]
+    .filter(([block]) => /running: true/.test(block) && /debounce\.restart\(\)/.test(block))
+    .map(([block]) => block)
+  return ["udevadm", "findmnt"]
+    .filter(tool => !monitors.some(block => block.includes('"' + tool + '"') && /onExited: monitorRestart/.test(block)))
+    .map(tool => `nothing in Service.qml rescans on what ${tool} reports, and restarts it when it dies`)
+})
+
+// The rows hold text fields. Handed a plain list, a Repeater rebuilds them all
+// whenever the list changes, and a half-typed passphrase is gone.
+check("a refresh does not rebuild the rows someone may be typing in", () => {
+  const models = [...panelSource.matchAll(/Repeater \{\s*model: (\w+ \{[^}]*\}|.*)/g)].map(m => m[1])
+  return [["root.devices", "path"], ["deviceBlock.modelData.volumes", "fsPath"]]
+    .filter(([values, key]) => !models.some(model => model.startsWith("ScriptModel {") &&
+      model.includes("values: " + values + "\n") && model.includes(`objectProp: "${key}"`)))
+    .map(([values, key]) => `Panel.qml repeats ${values} without matching rows by ${key}`)
+})
+
+// A column nobody asks lsblk for reads as missing, and a rule built on it is
+// quietly never true.
+check("every lsblk field Model reads is a column Service asks for", () => {
+  const columns = serviceSource.match(/"lsblk", "-J", "-b", "-o",\s*"([A-Z,]+)"/)
+  if (!columns) return ["Service.qml has no lsblk command this check can read"]
+  const asked = columns[1].toLowerCase().split(",")
+  // What the tree itself provides, and what a built device has instead.
+  const structural = ["children", "volumes"]
+  return [...new Set([...modelSource.matchAll(/\b(?:node|part|fsNode)\.([a-z]+)\b/g)].map(m => m[1]))]
+    .filter(field => !structural.includes(field) && !asked.includes(field))
+    .map(field => `Model.js reads "${field}", which lsblk is not asked for`)
+})
+
 // A verb the README promises and the handler never grew fails only for the
 // person who copied the line out of the README.
 const IPC_INTERNAL = new Set(["open", "close", "show", "hide", "toggle"])
@@ -206,6 +250,17 @@ check("every scripting verb the README documents is handled", () => {
     .map(m => m[1])
     .filter(verb => !handled.has(verb))
     .map(verb => `README documents "${verb}", which the IpcHandler does not define`)
+})
+
+// The README promises that anything but "ok" is the reason nothing happened, so
+// an answer made up beside the call is a refusal a script never hears about.
+check("an eject called by a script answers with what the service said", () => {
+  return [["eject", /return drives\.eject\(/], ["ejectAll", /return drives\.ejectAll\(\)/]]
+    .filter(([verb, returned]) => {
+      const start = panelSource.indexOf(`    function ${verb}(`)
+      return !returned.test(panelSource.slice(start, panelSource.indexOf("    function ", start + 8)))
+    })
+    .map(([verb]) => `the IpcHandler's "${verb}" does not return what drives.${verb} said`)
 })
 
 check("every scripting verb the handler defines is documented", () => {

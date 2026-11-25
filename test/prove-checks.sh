@@ -37,11 +37,23 @@ attempt "a QML file that no longer parses" \
 attempt "a call to a Model function that does not exist" \
   "sed -i 's/Model\.formatBytes(/Model.formatBytesRenamed(/' Panel.qml"
 
+attempt "a Model function that only its tests still use" \
+  "printf '\nfunction formerlyUseful() { return 1 }\n' >> Model.js"
+
 attempt "a panel binding to a service property that does not exist" \
   "sed -i '0,/drives\.devices/s//drives.deviceList/' Panel.qml"
 
 attempt "a device path concatenated into a command instead of quoted" \
-  "sed -i 's|\"udisksctl power-off --no-user-interaction -b \" + quote(device.path)|\"udisksctl power-off --no-user-interaction -b \" + device.path|' Service.qml"
+  "sed -i 's|command + \" \" + quote(volume.mountpoint)|command + \" \" + volume.mountpoint|' Service.qml"
+
+attempt "a mount nobody is told about" \
+  "sed -i 's|if (Model.isDriveMountEvent(line)) debounce.restart()|Model.isDriveMountEvent(line)|' Service.qml"
+
+attempt "rows rebuilt under whoever is typing in them" \
+  "sed -i '/objectProp: \"fsPath\"/d' Panel.qml"
+
+attempt "an lsblk column the model reads and nobody asks for" \
+  "sed -i 's|MOUNTPOINT,MOUNTPOINTS,|MOUNTPOINT,|' Service.qml"
 
 attempt "a scripting verb the README promises but nothing handles" \
   "sed -i 's|omarchy-shell removable-drives toggle|omarchy-shell removable-drives defragment|' README.md"
@@ -84,6 +96,30 @@ attempt "a script written in a shape the extractor cannot read" \
 # line for a one-line element and the wrong one for every element that wraps.
 attempt "a line map that points at the wrong source line" \
   "sed -i 's|lineOf(element.start)|lineOf(element.end)|' test/shell.test.js" \
+  shell
+
+attempt "a trash folder emptied without checking for a symlink" \
+  "sed -i 's|if \[ .*realpath -m -- .*!= .*then|if false; then|' Service.qml" \
+  shell
+
+attempt "an eject that ignores a volume still mounted" \
+  "sed -i 's|if \[ -n \"\$mounts\" \]; then|if false; then|' Service.qml" \
+  shell
+
+attempt "a sleep list whose last line is never read" \
+  "sed -i 's|printf \"%s.*n\" \"\$1\" > \"\$2\"|printf %s \"\$1\" > \"\$2\"|' Service.qml" \
+  shell
+
+attempt "a read-only volume put back writable after a rename" \
+  "sed -i 's|then set -- \"\$@\" -o ro; fi|then :; fi|' Service.qml" \
+  shell
+
+attempt "a caller that never says the volume is read-only" \
+  "sed -i 's|method, label, readOnly ? \"1\" : \"0\"\]|method, label]|' Service.qml" \
+  shell
+
+attempt "a monitor that died acted on as a sleep signal" \
+  "sed -i 's|wait_for_sleep_signal true \&\& unmount_targets|wait_for_sleep_signal true; unmount_targets|' Service.qml" \
   shell
 
 echo

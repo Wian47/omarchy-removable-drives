@@ -55,11 +55,10 @@ Panel {
   // is handed to the process, and is cleared the moment it is.
   property string unlockingPath: ""
 
-  // fsPath of the volume whose format is being set up, "" when none is. The
-  // chosen type and the erase choice live up here rather than in the row,
-  // because a refresh rebuilds the rows underneath a half-answered format and
-  // the answers should not go with them.
+  // fsPath of the volume whose format is being set up, "" when none is, with
+  // the chosen type and the erase choice.
   property string formattingPath: ""
+  property string formattingIdentity: ""
   property string formatType: ""
   property bool formatQuick: true
 
@@ -148,7 +147,7 @@ Panel {
 
   function handleBarPress(buttonCode) {
     if (buttonCode === Qt.RightButton) {
-      drives.refresh()
+      drives.rescan()
     } else if (buttonCode === Qt.MiddleButton) {
       var mounted = Model.mountedVolumes(devices)
       if (mounted.length > 0) drives.openVolume(mounted[0])
@@ -208,6 +207,7 @@ Panel {
     var types = Model.formatTypes(drives.fsCapabilities)
     formatType = types.indexOf(volume.fstype) !== -1 ? volume.fstype : (types.length > 0 ? types[0] : "")
     formatQuick = true
+    formattingIdentity = Model.volumeIdentity(drives.deviceOfVolume(volume), volume)
     formattingPath = volume.fsPath
   }
 
@@ -224,6 +224,17 @@ Panel {
     if (volume.mounted) drives.openVolume(volume)
     else if (Model.canUnlock(volume)) beginUnlock(volume)
     else drives.mount(volume, openOnMount)
+  }
+
+  function pressVolume(volume, button) {
+    if (button === Qt.MiddleButton) drives.copyPath(volume)
+    else activateVolume(volume)
+  }
+
+  // A locked volume has no mount to toggle until it has been given a passphrase.
+  function toggleVolume(volume) {
+    if (Model.canUnlock(volume)) beginUnlock(volume)
+    else drives.toggleMount(volume, openOnMount)
   }
 
   function ejectCurrent() {
@@ -270,7 +281,12 @@ Panel {
     // comes and goes underneath them; it is the fsPath that has to still
     // exist, not the mount.
     if (renamingLabelPath !== "" && !drives.volumeByPath(renamingLabelPath)) renamingLabelPath = ""
-    if (formattingPath !== "" && !drives.volumeByPath(formattingPath)) formattingPath = ""
+    // A format needs more than the path: the stick that was swapped in has the
+    // same one, and the code to type is made from it.
+    if (formattingPath !== "") {
+      var target = drives.volumeByPath(formattingPath)
+      if (Model.volumeIdentity(drives.deviceOfVolume(target), target) !== formattingIdentity) formattingPath = ""
+    }
     // An unlock replaces the locked volume with its mapper, so the row this
     // field belongs to is gone the moment it succeeds.
     if (unlockingPath !== "") {
@@ -326,8 +342,7 @@ Panel {
     function eject(path: string): string {
       for (var i = 0; i < drives.devices.length; i++) {
         if (drives.devices[i].path === path) {
-          drives.eject(drives.devices[i])
-          return "ok"
+          return drives.eject(drives.devices[i])
         }
       }
       return "unknown device: " + path
@@ -337,8 +352,7 @@ Panel {
     function rename(path: string, nickname: string): string {
       for (var i = 0; i < drives.devices.length; i++) {
         if (drives.devices[i].path === path) {
-          drives.setNickname(drives.devices[i], nickname)
-          return "ok"
+          return drives.setNickname(drives.devices[i], nickname)
         }
       }
       return "unknown device: " + path
@@ -403,11 +417,7 @@ Panel {
       return "unknown device: " + path
     }
 
-    function ejectAll(): string {
-      if (drives.devices.length === 0) return "no drives attached"
-      drives.ejectAll()
-      return "ok"
-    }
+    function ejectAll(): string { return drives.ejectAll() }
 
     // "busy" while the kernel still has I/O in flight or a drive is running
     // its connect hook — a script can poll this before telling someone it is
@@ -509,7 +519,7 @@ Panel {
         else if (text === "f" || text === "F") root.beginFormat(root.currentVolume())
         else if (text === "m" || text === "M") {
           if (root.currentRow && root.currentRow.kind === "portable") drives.togglePortable(root.currentPortable())
-          else drives.toggleMount(root.currentVolume(), root.openOnMount)
+          else root.toggleVolume(root.currentVolume())
         }
       }
 
@@ -611,7 +621,7 @@ Panel {
               foreground: root.foreground
               hoverColor: root.urgent
               fontFamily: root.fontFamily
-              enabled: !drives.busy && drives.blockedFsPath !== ""
+              enabled: drives.blockedFsPath !== "" && !drives.busyWithVolume(drives.volumeByPath(drives.blockedFsPath))
               Layout.alignment: Qt.AlignVCenter
               onClicked: drives.forceUnmountBlocked()
             }
@@ -673,7 +683,7 @@ Panel {
               tooltipText: "Mount read-only so files can be copied off safely"
               foreground: root.foreground
               fontFamily: root.fontFamily
-              enabled: !drives.busy && drives.repairOffered
+              enabled: drives.repairOffered && !drives.busyWithVolume(drives.volumeByPath(drives.checkedFsPath))
               Layout.alignment: Qt.AlignVCenter
               onClicked: drives.mountReadOnly(drives.volumeByPath(drives.checkedFsPath))
             }
@@ -702,8 +712,14 @@ Panel {
             horizontalAlignment: Text.AlignHCenter
           }
 
+          // Matched by path, so a refresh updates the rows in place. A plain
+          // list rebuilds every row when anything on any drive changes, free
+          // space included, and takes whatever was being typed with it.
           Repeater {
-            model: root.devices
+            model: ScriptModel {
+              values: root.devices
+              objectProp: "path"
+            }
 
             Column {
               id: deviceBlock
@@ -720,7 +736,10 @@ Panel {
               }
 
               Repeater {
-                model: deviceBlock.modelData.volumes
+                model: ScriptModel {
+                  values: deviceBlock.modelData.volumes
+                  objectProp: "fsPath"
+                }
 
                 VolumeRow {
                   required property var modelData
@@ -839,6 +858,7 @@ Panel {
     // it for this drive alone.
     readonly property var autoOpen: Model.autoOpenPolicy(Model.driveSettings(drives.store, device).autoOpen)
     readonly property bool mountsReadOnly: Model.shouldMountReadOnly(drives.store, device)
+    readonly property bool blocked: drives.busyWith(device)
     readonly property bool ejectPending: device
       && (drives.pendingEjectPath === device.path || drives.pendingEjectPath === "*")
 
@@ -1064,7 +1084,7 @@ Panel {
         foreground: deviceRow.ejectPending ? root.urgent : root.foreground
         hoverColor: root.urgent
         fontFamily: root.fontFamily
-        enabled: !drives.busy
+        enabled: !deviceRow.blocked
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfDevice(deviceRow.deviceIndex)) }
         onClicked: {
@@ -1158,7 +1178,7 @@ Panel {
         tooltipText: portableRow.entry && portableRow.entry.mounted ? "Unmount" : "Mount"
         foreground: root.foreground
         fontFamily: root.fontFamily
-        enabled: !drives.busy
+        enabled: !drives.busyWith(null)
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfPortable(portableRow.portableIndex)) }
         onClicked: drives.togglePortable(portableRow.entry)
@@ -1179,7 +1199,8 @@ Panel {
       && root.currentRow.volume === volumeIndex
     readonly property bool actionable: volume
       && (volume.mounted || Model.isMountable(volume) || (volume.encrypted && !volume.unlocked))
-    readonly property bool working: volume && drives.busyPath === volume.fsPath
+    readonly property bool working: volume && drives.workingOn(volume.fsPath)
+    readonly property bool blocked: drives.busyWithVolume(volume)
     readonly property real trashBytes: volume ? drives.trashSizeFor(volume) : 0
 
     readonly property bool renamingLabel: volume && root.renamingLabelPath === volume.fsPath
@@ -1196,7 +1217,7 @@ Panel {
     // than after the drive has been erased to hold it.
     readonly property var formatCheck: formatting
       ? Model.validateFormat(drives.fsCapabilities, volume, drives.deviceOfVolume(volume),
-                             { fsPath: volume.fsPath, fstype: root.formatType,
+                             { identity: root.formattingIdentity, fstype: root.formatType,
                                label: formatLabelField.text, quick: root.formatQuick })
       : null
     readonly property int formatRoom: formatting
@@ -1241,7 +1262,8 @@ Panel {
     // in the field reaches this without passing the button's enabled state.
     function commitFormat() {
       if (!Model.formatConfirmed(volumeRow.volume, confirmField.text)) return
-      drives.formatVolume(volumeRow.volume, root.formatType, formatLabelField.text, root.formatQuick)
+      drives.formatVolume(volumeRow.volume, root.formatType, formatLabelField.text, root.formatQuick,
+                          root.formattingIdentity)
       root.finishFormat()
     }
 
@@ -1256,13 +1278,16 @@ Panel {
     MouseArea {
       anchors.fill: parent
       hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.MiddleButton
       cursorShape: volumeRow.actionable && !volumeRow.renamingLabel && !volumeRow.formatting
         ? Qt.PointingHandCursor : Qt.ArrowCursor
       onEntered: root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex))
       // A click anywhere on the row mounts or opens it, which is the wrong
       // answer for someone reaching past a half-typed name to their cursor —
       // and a mount is the one thing that would take a planned format away.
-      onClicked: if (!volumeRow.renamingLabel && !volumeRow.formatting) root.activateVolume(volumeRow.volume)
+      onClicked: function(mouse) {
+        if (!volumeRow.renamingLabel && !volumeRow.formatting) root.pressVolume(volumeRow.volume, mouse.button)
+      }
     }
 
     RowLayout {
@@ -1551,7 +1576,7 @@ Panel {
             fontFamily: root.fontFamily
             fontSize: Style.font.bodySmall
             size: Style.space(18)
-            enabled: !drives.busy
+            enabled: !volumeRow.blocked
             onClicked: drives.emptyTrash(volumeRow.volume)
           }
         }
@@ -1565,7 +1590,7 @@ Panel {
         tooltipText: "Lock — unmounts and closes the encrypted container"
         foreground: root.foreground
         fontFamily: root.fontFamily
-        enabled: !drives.busy
+        enabled: !volumeRow.blocked
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex)) }
         onClicked: drives.lock(volumeRow.volume)
@@ -1580,7 +1605,7 @@ Panel {
         tooltipText: "Rename this volume — changes the label on the drive itself"
         foreground: root.foreground
         fontFamily: root.fontFamily
-        enabled: !drives.busy
+        enabled: !volumeRow.blocked
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex)) }
         onClicked: root.beginLabelEdit(volumeRow.volume)
@@ -1652,13 +1677,10 @@ Panel {
         }
         foreground: root.foreground
         fontFamily: root.fontFamily
-        enabled: !drives.busy
+        enabled: !volumeRow.blocked
         Layout.alignment: Qt.AlignVCenter
         onHovered: function(on) { if (on) root.setCursor(root.rowIndexOfVolume(volumeRow.deviceIndex, volumeRow.volumeIndex)) }
-        onClicked: {
-          if (Model.canUnlock(volumeRow.volume)) root.beginUnlock(volumeRow.volume)
-          else drives.toggleMount(volumeRow.volume, root.openOnMount)
-        }
+        onClicked: root.toggleVolume(volumeRow.volume)
       }
     }
   }

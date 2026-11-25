@@ -83,6 +83,15 @@ test("refuses to offer the disk the system is running from", () => {
   assert.strictEqual(devices.length, 0)
 })
 
+test("a system mount counts even when lsblk names another mount of the same filesystem", () => {
+  // Captured from a btrfs root: MOUNTPOINT holds one subvolume, and not "/".
+  const devices = api.parse(tree([disk({ children: [part({
+    fstype: "btrfs", mountpoint: "/var/log",
+    mountpoints: ["/var/log", "/home", "/var/cache/pkg", "/"]
+  })] })]))
+  assert.strictEqual(devices.length, 0)
+})
+
 test("keeps a drive whose mount point merely looks systemish", () => {
   const devices = api.parse(tree([disk({ children: [part({ mountpoint: "/run/media/wian47/BACKUP" })] })]))
   assert.strictEqual(devices.length, 1)
@@ -96,10 +105,43 @@ test("treats a disk with no partition table as one volume", () => {
   assert.strictEqual(devices[0].volumes[0].fsPath, "/dev/sdb")
 })
 
-test("reports an empty, unformatted disk with no volumes", () => {
-  const devices = api.parse(tree([disk({ children: [] })]))
-  assert.strictEqual(devices.length, 1)
-  assert.strictEqual(devices[0].volumes.length, 0)
+test("a blank disk is one volume that can be formatted and not mounted", () => {
+  const device = api.parse(tree([disk({ children: [] })]))[0]
+  assert.strictEqual(device.volumes.length, 1)
+  assert.strictEqual(device.volumes[0].fsPath, "/dev/sdb")
+  assert.strictEqual(api.isMountable(device.volumes[0]), false)
+  const caps = api.parseFsCapabilities('Supported as 1 "exfat"')
+  assert.strictEqual(api.canFormat(caps, device.volumes[0], device), null)
+})
+
+test("a disk used whole by something else is not offered as a blank one", () => {
+  const device = api.parse(tree([disk({ children: [
+    { name: "md0", path: "/dev/md0", type: "raid1", size: 1000, children: [] }
+  ] })]))[0]
+  assert.deepStrictEqual(device.volumes, [])
+})
+
+test("ignores a reader with nothing in it", () => {
+  for (const size of [0, null, undefined]) {
+    assert.strictEqual(api.parse(tree([disk({ size })])).length, 0, String(size))
+  }
+})
+
+test("ignores the firmware areas of an eMMC chip, but not the card itself", () => {
+  for (const name of ["mmcblk0boot0", "mmcblk0boot1", "mmcblk1rpmb"]) {
+    assert.strictEqual(api.parse(tree([disk({ name, path: "/dev/" + name })])).length, 0, name)
+  }
+  assert.strictEqual(api.parse(tree([disk({ name: "mmcblk0", path: "/dev/mmcblk0" })])).length, 1)
+})
+
+test("a drive can be mounted one day if anything on it is mountable, mounted or locked", () => {
+  const holding = overrides => api.parse(tree([disk({ children: [part(overrides)] })]))[0]
+  assert.strictEqual(api.canEverMount(holding({})), true)
+  assert.strictEqual(api.canEverMount(holding({ mountpoint: "/run/media/x/STICK" })), true)
+  assert.strictEqual(api.canEverMount(holding({ fstype: "crypto_LUKS" })), true)
+  assert.strictEqual(api.canEverMount(holding({ fstype: "swap" })), false)
+  assert.strictEqual(api.canEverMount(holding({ fstype: null })), false)
+  assert.strictEqual(api.canEverMount(null), false)
 })
 
 console.log("\nLUKS")
@@ -484,11 +526,18 @@ test("keeps a drive's other settings when one of them changes", () => {
   assert.strictEqual(store.drives["serial:ABC123"].nickname, "Backup")
 })
 
-test("a corrupt or missing state file reads as empty, not as a crash", () => {
+test("a missing or empty state file is no settings", () => {
   assert.deepStrictEqual(api.parseStore("").drives, {})
-  assert.deepStrictEqual(api.parseStore("{ not json").drives, {})
-  assert.deepStrictEqual(api.parseStore("null").drives, {})
+  assert.deepStrictEqual(api.parseStore(" \n").drives, {})
+  assert.deepStrictEqual(api.parseStore('{"version":1}').drives, {})
   assert.deepStrictEqual(api.parseStore('{"drives":{"serial:A":{"nickname":"X"}}}').drives, { "serial:A": { nickname: "X" } })
+})
+
+test("a state file that cannot be read is not taken for one with no settings", () => {
+  for (const raw of ["{ not json", '{"drives":{"serial:A":{"readOnly":true},}}', "null", "[]", "7",
+                     '{"drives":[]}', '{"drives":"none"}', '{"drives":null}']) {
+    assert.strictEqual(api.parseStore(raw), null, raw)
+  }
 })
 
 console.log("\nper-drive mount policy")
@@ -526,8 +575,11 @@ test("an autoOpen nobody can read falls back to the global setting rather than g
 test("a drive mounts writable unless it was asked not to", () => {
   assert.strictEqual(api.shouldMountReadOnly(saved({}), POLICY_DRIVE), false)
   assert.strictEqual(api.shouldMountReadOnly(saved({ readOnly: false }), POLICY_DRIVE), false)
-  assert.strictEqual(api.shouldMountReadOnly(null, POLICY_DRIVE), false)
   assert.strictEqual(api.shouldMountReadOnly(saved({ readOnly: true }), null), false)
+})
+
+test("a drive mounts read-only while nobody can read what was saved for it", () => {
+  assert.strictEqual(api.shouldMountReadOnly(null, POLICY_DRIVE), true)
 })
 
 test("a drive marked read-only mounts read-only", () => {
@@ -846,6 +898,16 @@ test("explains an iPhone that Linux cannot reach yet", () => {
   assert.strictEqual(hint.packages, "usbmuxd gvfs-afc gvfs-gphoto2")
 })
 
+test("does not mistake the rest of what Apple makes for an iPhone", () => {
+  // Captured from a MacBook.
+  const macbook = ["backend mtp", "usb 05ac,03 IR Receiver", "usb 05ac,08 iPod",
+    "usb 05ac,ff,e0,ff,fe Bluetooth USB Host Controller",
+    "usb 05ac,03,03,03 Apple Internal Keyboard / Trackpad",
+    "usb 05ac,0e,0e,ff FaceTime HD Camera (Built-in)"].join("\n")
+  assert.strictEqual(api.supportHint(api.parseSupport(macbook)), null)
+  assert.ok(api.supportHint(api.parseSupport(macbook + "\nusb 05ac,06,ff,ff iPhone")).text.includes("iPhone"))
+})
+
 test("stops explaining once the backend is installed", () => {
   const probe = PROBE_NO_AFC + "\nbackend afc\nusb 05ac,06,ff,ff iPhone"
   assert.strictEqual(api.supportHint(api.parseSupport(probe)), null)
@@ -1004,7 +1066,7 @@ test("each filesystem carries its own label ceiling", () => {
   assert.strictEqual(api.labelLimit("ext4"), 16)
   assert.strictEqual(api.labelLimit("xfs"), 12)
   assert.strictEqual(api.labelLimit("ntfs"), 128)
-  assert.strictEqual(api.labelLimit("btrfs"), 256)
+  assert.strictEqual(api.labelLimit("btrfs"), 255)
 })
 
 test("a filesystem with no tool to write its label cannot be renamed", () => {
@@ -1065,6 +1127,42 @@ test("the counter goes negative once the name is too long", () => {
   assert.strictEqual(api.labelRemaining(volume({}), ""), 11)
   assert.strictEqual(api.labelRemaining(volume({}), "STICK"), 6)
   assert.strictEqual(api.labelRemaining(volume({}), "WAYTOOLONGLABEL"), -4)
+})
+
+// The longest run of each letter libblockdev's own bd_fs_*_check_label accepts,
+// measured against libblockdev 3. Btrfs is one byte shorter, as mkfs.btrfs is.
+test("a label is measured the way each filesystem measures it", () => {
+  const longest = (fstype, letter) => {
+    let count = 0
+    while (api.validateLabel(volume({ fstype }), letter.repeat(count + 1)).ok) count++
+    return count
+  }
+  for (const [fstype, ascii, cyrillic, euro] of [
+    ["exfat", 11, 11, 11], ["ext4", 16, 8, 5], ["ntfs", 128, 64, 42], ["btrfs", 255, 127, 85],
+    ["xfs", 12, 6, 4], ["f2fs", 512, 256, 170], ["nilfs2", 80, 40, 26], ["udf", 126, 63, 63]
+  ]) {
+    assert.deepStrictEqual([longest(fstype, "A"), longest(fstype, "Ж"), longest(fstype, "€")],
+      [ascii, cyrillic, euro], fstype)
+  }
+  assert.strictEqual(longest("udf", "é"), 126)
+  assert.strictEqual(longest("exfat", "😀"), 5)
+  assert.strictEqual(longest("ext4", "😀"), 4)
+})
+
+test("FAT32 refuses any letter its tools cannot write", () => {
+  for (const label of ["СНИМКИ", "CAFÉ", "😀", "TAB\tBED"]) {
+    const result = api.validateLabel(volume({}), label)
+    assert.strictEqual(result.ok, false, label)
+    assert.match(result.message, /plain Latin letters/)
+  }
+  assert.strictEqual(api.validateLabel(volume({}), "MY-DISK_1 ~").ok, true)
+})
+
+test("a label too long in bytes says so, and the counter agrees", () => {
+  const result = api.validateLabel(volume({ fstype: "ext4" }), "СНИМКИ БГ")
+  assert.strictEqual(result.ok, false)
+  assert.match(result.message, /at most 16 bytes.*that is 1 too many/)
+  assert.strictEqual(api.labelRemaining(volume({ fstype: "ext4" }), "СНИМКИ БГ"), -1)
 })
 
 test("a filesystem we cannot label is refused rather than validated", () => {
@@ -1271,7 +1369,8 @@ function stick(overrides) {
 }
 
 function plan(overrides) {
-  return Object.assign({ fsPath: "/dev/sdb1", fstype: "exfat", label: "PHOTOS", quick: true }, overrides)
+  return Object.assign({ identity: api.volumeIdentity(FORMAT_DRIVE, FORMAT_VOLUME),
+                         fstype: "exfat", label: "PHOTOS", quick: true }, overrides)
 }
 
 const FORMAT_DRIVE = stick({})
@@ -1381,10 +1480,30 @@ test("every refusal canFormat has is a refusal the plan has", () => {
 })
 
 test("a plan aimed at a volume other than the one it is checked against is refused", () => {
-  const result = api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ fsPath: "/dev/sdb2" }))
-  assert.strictEqual(result.ok, false)
-  assert.match(result.reason, /planned for a different volume/,
-    "a /dev path is reusable, so a plan made for one stick must not run against its replacement")
+  const swapped = [
+    api.parse(tree([disk({ serial: "OTHER", children: [part({})] })]))[0],
+    stick({ uuid: "NEW-UUID" }),
+    stick({ size: 1000 }),
+    stick({ path: "/dev/sdb2" })
+  ]
+  for (const drive of swapped) {
+    const result = api.validateFormat(FORMAT_CAPS, drive.volumes[0], drive, plan({}))
+    assert.strictEqual(result.ok, false)
+    assert.match(result.reason, /planned for a different volume/,
+      "a /dev path is reusable, so a plan made for one stick must not run against its replacement")
+  }
+  for (const identity of ["", undefined, null]) {
+    assert.strictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE, plan({ identity })).ok, false)
+  }
+})
+
+test("a volume is the same one after a rescan, a mount or a rename", () => {
+  const identity = api.volumeIdentity(FORMAT_DRIVE, FORMAT_VOLUME)
+  for (const overrides of [{}, { mountpoint: "/run/media/x/STICK" }, { label: "RENAMED" }]) {
+    const drive = stick(overrides)
+    assert.strictEqual(api.volumeIdentity(drive, drive.volumes[0]), identity)
+  }
+  assert.strictEqual(api.volumeIdentity(null, null), "")
 })
 
 test("a plan that does not say whether to erase the drive first is refused", () => {
@@ -1421,6 +1540,15 @@ test("a label the target filesystem forbids is refused before the drive is touch
     plan({ fstype: "vfat", label: "MY:DISK" }))
   assert.strictEqual(result.ok, false)
   assert.match(result.reason, /cannot contain :/)
+})
+
+test("a label the tools would fail on is refused before the drive is erased for it", () => {
+  for (const [fstype, label] of [["vfat", "СНИМКИ"], ["ext4", "СНИМКИ БГ 2026!"]]) {
+    assert.strictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE,
+      plan({ fstype, label })).ok, false, fstype)
+  }
+  assert.strictEqual(api.validateFormat(FORMAT_CAPS, FORMAT_VOLUME, FORMAT_DRIVE,
+    plan({ fstype: "exfat", label: "СНИМКИ БГ" })).ok, true)
 })
 
 test("an empty label is a real answer here too — the drive ships without one", () => {
@@ -1529,6 +1657,16 @@ test("a later mount on the same point shadows the earlier one", () => {
   assert.strictEqual(flags["/mnt"].readOnly, true, "the top of the stack is what you are looking at")
 })
 
+test("a drive being mounted or unmounted is worth a rescan, a container is not", () => {
+  // Captured from `findmnt --poll -rno ACTION,SOURCE`.
+  for (const line of ["mount /dev/sdb1", "umount /dev/sdb1", "remount /dev/mapper/luks-x", "mount /dev/mapper/root[/@/usr]"]) {
+    assert.strictEqual(api.isDriveMountEvent(line), true, line)
+  }
+  for (const line of ["mount tmpfs", "umount overlay", "mount nsfs[net:[4026532000]]", "", null]) {
+    assert.strictEqual(api.isDriveMountEvent(line), false, String(line))
+  }
+})
+
 test("a volume is only read-only when it is actually mounted", () => {
   const mounted = { mounted: true, mountpoint: "/run/media/wian47/MY RESCUE" }
   const unmounted = { mounted: false, mountpoint: "" }
@@ -1618,23 +1756,6 @@ test("nothing mounted means nothing to unmount", () => {
 })
 
 console.log("\nunlocking")
-
-test("the cleartext device is read out of what udisksctl says", () => {
-  assert.strictEqual(api.parseUnlockedMapper("Unlocked /dev/sdb1 as /dev/dm-0.\n"), "/dev/dm-0")
-})
-
-test("a mapper name containing a dot survives the trailing full stop", () => {
-  assert.strictEqual(
-    api.parseUnlockedMapper("Unlocked /dev/sdb1 as /dev/mapper/luks-a.b.\n"),
-    "/dev/mapper/luks-a.b",
-    "the period is the sentence ending, not a delimiter")
-})
-
-test("an answer that names no device yields nothing rather than a guess", () => {
-  for (const raw of ["", "\n", "Error unlocking", "Unlocked /dev/sdb1"]) {
-    assert.strictEqual(api.parseUnlockedMapper(raw), "", JSON.stringify(raw))
-  }
-})
 
 test("locking is offered exactly when unlocking is not", () => {
   const locked = { encrypted: true, unlocked: false }
@@ -1749,6 +1870,27 @@ test("no hook at all is not a finished hook", () => {
   const state = api.hookState(null, false)
   assert.strictEqual(state.active, false)
   assert.strictEqual(state.done, false, "nothing ran, so nothing finished")
+})
+
+test("a poll that beats the hook to its pid file does not end it", () => {
+  const launched = { active: true, percent: null, status: "", done: false, startedAt: 1000 }
+  const tooEarly = api.hookState(null, false)
+  assert.strictEqual(api.mergeHookState(launched, tooEarly, 1010).active, true)
+
+  const lastRun = api.hookState({ percent: 100, status: "", done: true }, false)
+  assert.strictEqual(api.mergeHookState(launched, lastRun, 1010).active, true,
+    "the progress file can still hold what the previous run wrote")
+})
+
+test("a hook that really has ended is believed", () => {
+  const launched = { active: true, percent: null, status: "", done: false, startedAt: 1000 }
+  const ended = api.hookState(null, false)
+  assert.strictEqual(api.mergeHookState(launched, ended, 1000 + api.HOOK_START_GRACE_MS).active, false)
+
+  const seenRunning = api.mergeHookState(launched, api.hookState(null, true), 1500)
+  assert.strictEqual(api.mergeHookState(seenRunning, ended, 1600).active, false,
+    "once it has been seen running there is nothing left to wait for")
+  assert.strictEqual(api.mergeHookState(undefined, ended, 1000).active, false)
 })
 
 test("the row says what the hook says, and says something when it says nothing", () => {
@@ -1878,6 +2020,14 @@ test("a drive with no health to report is unremarkable, not a warning", () => {
   assert.strictEqual(api.smartVerdict(null), "unsupported")
   assert.strictEqual(api.smartHint(api.parseSmart("")), "",
     "a thumb drive must not grow a health row it will never fill")
+})
+
+test("a drive whose health was never read is not called healthy", () => {
+  for (const reading of [SMART_NVME, SMART_ATA]) {
+    const smart = api.parseSmart(reading.replace(/SmartUpdated t \d+/, "SmartUpdated t 0"))
+    assert.strictEqual(api.smartVerdict(smart), "unsupported")
+    assert.deepStrictEqual(smart, api.parseSmart(""), "nothing it says about its health means anything")
+  }
 })
 
 test("a drive with nothing wrong with it is healthy", () => {

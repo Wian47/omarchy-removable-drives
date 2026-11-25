@@ -67,8 +67,8 @@ omarchy plugin add https://github.com/Wian47/omarchy-removable-drives.git --enab
 ```
 
 Needs Omarchy 4 (Quattro) and `udisks2`, both standard. It calls `lsblk`,
-`udevadm`, `udisksctl`, `busctl`, `gio`, `fuser`, `du`, `wl-copy` and Omarchy's
-own `omarchy-*` helpers. Nothing runs as root.
+`udevadm`, `findmnt`, `udisksctl`, `busctl`, `gio`, `fuser`, `du`, `wl-copy` and
+Omarchy's own `omarchy-*` helpers. Nothing runs as root.
 
 To remove it:
 
@@ -155,9 +155,11 @@ drive:
 }
 ```
 
-`onConnect` runs through `bash -c` when that drive appears, with `$1` as its
-device path, `$2` as its first mount point, and `$3` as a file it may write
-progress to. Nothing writes it for you.
+`onConnect` runs through `bash -c` once that drive is connected and mounted,
+with `$1` as its device path, `$2` as its first mount point, and `$3` as a file
+it may write progress to. A locked drive counts as connected once it is
+unlocked and mounted, and only a drive with nothing to mount gets an empty
+`$2`. Nothing writes it for you.
 
 ### Reporting progress from a hook
 
@@ -217,7 +219,9 @@ mounts every volume on the drive read-only, which is what an archive disk you
 never want written to wants. The panel writes both from the drive row, and
 reads them strictly on the way back in: a `readOnly` that is neither `true` nor
 `false` is taken as `true`, because a typo in this file must not be the reason
-an archive drive came up writable.
+an archive drive came up writable. If the file stops being valid JSON, the
+panel says so, keeps the settings it last read, and saves nothing over it. With
+none read yet, it mounts read-only until the file is fixed.
 
 ## Scripting
 
@@ -251,6 +255,10 @@ what percent, and `health` carries each drive's verdict — `unsupported`,
 own verdict in `status` as `healthy`: `true`, `false`, or `null` when the
 answer could not be read.
 
+A check, a repair or a format can take hours, and holds up only the drive it is
+running on; every other drive can still be mounted and ejected meanwhile.
+`working` in `status` says whether any action is running at all.
+
 `smart` returns the whole record, and answers `supported: false` with every
 other field `null` for the many drives that report no health at all.
 
@@ -276,14 +284,15 @@ bus through `busctl`. It is still `allow_active: yes`, the same no-password
 path mounting takes. The object path is asked for rather than built, since
 udisks escapes the kernel name into it and an unlocked LUKS volume lands at
 `dm_2d3`. The rename and the fsck unmount the filesystem first and mount it
-back afterwards, whether or not the middle step worked; the format does
-neither, because a mounted volume is refused outright rather than taken offline
+back afterwards, whether or not the middle step worked. It goes back read-only
+if it was read-only before, if the drive is set to mount that way, or if the
+fsck found errors. The format does neither, because a mounted volume is refused outright rather than taken offline
 on the way to being erased.
 
 A format is checked as one plan — which volume, which type, which label,
 whether to zero the drive first — rather than as four arguments each looked at
-somewhere along the way, and the plan names the `/dev` node it was made for, so
-swapping the stick between planning it and confirming it retracts the format
+somewhere along the way, and the plan names the drive it was made for rather
+than the `/dev` node it sat on, so swapping the stick between planning it and confirming it retracts the format
 instead of pointing it at the replacement.
 
 Health comes the same way, off `org.freedesktop.UDisks2.Drive.Ata` or
@@ -308,12 +317,14 @@ RAM-backed runtime directory and a trap removes it however the unlock ends.
 
 Emptying a drive's trash is the only recursive delete here, so the path is
 re-derived from the live mount list and must exactly match a `.Trash-<uid>`
-candidate of a mounted removable volume. The tests assert it refuses `/`,
-`$HOME`, the mount root, and drives it is not tracking.
+candidate of a mounted removable volume, and must not pass through a symlink.
+The tests assert it refuses `/`, `$HOME`, the mount root, a symlinked trash
+folder, and drives it is not tracking.
 
 ```bash
-node test/model.test.js       # 237 tests, no compositor required
-node test/shell.test.js       # shellcheck over the shell inside Service.qml
+node test/model.test.js       # 251 tests, no compositor required
+node test/shell.test.js       # lints and runs the shell inside Service.qml
+node test/service.test.js     # runs the functions inside Service.qml
 omarchy plugin validate .     # the same check the shell applies
 ```
 
