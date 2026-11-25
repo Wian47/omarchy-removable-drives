@@ -115,6 +115,10 @@ attempt "a caller that never says the volume is read-only" \
   "sed -i 's|method, label, readOnly ? \"1\" : \"0\"\]|method, label]|' Service.qml" \
   shell
 
+attempt "a monitor that died acted on as a sleep signal" \
+  "sed -i 's|wait_for_sleep_signal true \&\& unmount_targets|wait_for_sleep_signal true; unmount_targets|' Service.qml" \
+  shell
+
 echo
 echo "caught $pass, missed $missed"
 [ "$missed" -eq 0 ] || exit 1

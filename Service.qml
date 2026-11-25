@@ -718,14 +718,21 @@ Item {
     '  exit 0',
     '}',
     'trap cleanup EXIT INT TERM HUP',
+    // Fails when the monitor ends without the signal. That is gdbus dying, not
+    // the machine going to sleep, and must not be acted on as if it were.
     'wait_for_sleep_signal() {',
-    '  coproc MONITOR { gdbus monitor --system --dest org.freedesktop.login1' +
-      ' --object-path /org/freedesktop/login1; }',
-    '  while IFS= read -r line <&"${MONITOR[0]}"; do',
-    '    case "$line" in *"PrepareForSleep ($1,)"*) break ;; esac',
+    '  local seen=1 events line',
+    '  exec {events}< <(exec gdbus monitor --system --dest org.freedesktop.login1' +
+      ' --object-path /org/freedesktop/login1)',
+    '  MONITOR_PID=$!',
+    '  while IFS= read -r line <&"$events"; do',
+    '    case "$line" in *"PrepareForSleep ($1,)"*) seen=0; break ;; esac',
     '  done',
+    '  exec {events}<&-',
     '  kill "$MONITOR_PID" 2>/dev/null',
     '  wait "$MONITOR_PID" 2>/dev/null',
+    '  MONITOR_PID=""',
+    '  return "$seen"',
     '}',
     // A drive that refused to unmount is the whole reason this exists, so it
     // is the one outcome that must not pass in silence. Sleeping while
@@ -759,13 +766,17 @@ Item {
     '  # shellcheck disable=SC2016',
     '  setsid systemd-inhibit --what=sleep --mode=delay --who="Removable Drives"' +
       ' --why="Unmounting removable drives" \\',
-    "    bash -c 'wait_for_sleep_signal true; unmount_targets \"$1\" \"$2\" \"$3\"'" +
+    "    bash -c 'wait_for_sleep_signal true && unmount_targets \"$1\" \"$2\" \"$3\"'" +
       ' removable-drives "$targets" "$notify" "$glyph" &',
     '  inhibit_pid=$!',
     '  printf %s "$inhibit_pid" > "$guardfile"',
     '  wait "$inhibit_pid"',
+    '  slept=$?',
     '  inhibit_pid=""',
-    '  wait_for_sleep_signal false',
+    // Nothing slept, so there is no resume to wait for. The pause is what keeps
+    // a monitor that will not start from being restarted in a tight loop.
+    '  if [ "$slept" != 0 ]; then sleep 5; continue; fi',
+    '  wait_for_sleep_signal false || sleep 5',
     'done'
   ].join("\n")
 

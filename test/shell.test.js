@@ -428,6 +428,34 @@ check("the caller tells the script whether the volume is read-only", () => {
   assert.match(body, /label, readOnly \? "1" : "0"\]/)
 })
 
+check("a monitor that dies is not taken for the machine going to sleep", () => inLab(lab => {
+  const list = path.join(lab, "targets")
+  fs.writeFileSync(list, "/dev/sdb1\n")
+  const stub = stubCommands(lab, {
+    gdbus: "echo started >> '" + path.join(lab, "monitors") + "'",
+    "systemd-inhibit": 'while [[ $1 == --* ]]; do shift; done; exec "$@"',
+    // The pause before another try, where the guard is stopped.
+    sleep: 'echo "pause $1" >> \'' + path.join(lab, "pauses") + '\'; kill "$PPID"'
+  })
+  runScript("suspendScript", [list, path.join(lab, "guard"), "0", ""], stub.bin)
+  assert.deepStrictEqual(stub.calls(), [], "drives were unmounted with no sleep signal")
+  assert.strictEqual(fs.readFileSync(path.join(lab, "pauses"), "utf8"), "pause 5\n")
+  assert.strictEqual(fs.readFileSync(path.join(lab, "monitors"), "utf8"), "started\n")
+}))
+
+check("the guard re-arms after the machine wakes", () => inLab(lab => {
+  const list = path.join(lab, "targets")
+  fs.writeFileSync(list, "/dev/sdb1\n")
+  const stub = stubCommands(lab, {
+    gdbus: "for state in true false; do echo \"/org/freedesktop/login1: PrepareForSleep ($state,)\"; done; exec sleep 1",
+    // Stops the guard once the lock has been taken a second time.
+    "systemd-inhibit": `echo armed >> '${path.join(lab, "armed")}'; while [[ $1 == --* ]]; do shift; done; "$@"; ` +
+      `status=$?; [ "$(wc -l < '${path.join(lab, "armed")}')" -lt 2 ] || kill "$PPID"; exit $status`
+  })
+  runScript("suspendScript", [list, path.join(lab, "guard"), "0", ""], stub.bin)
+  assert.deepStrictEqual(stub.calls(), ["unmount -b /dev/sdb1", "unmount -b /dev/sdb1"])
+}))
+
 console.log("")
 if (failures > 0) {
   console.log(failures === 1 ? "1 check failed." : failures + " checks failed.")
