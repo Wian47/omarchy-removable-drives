@@ -76,32 +76,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq qt6-declarative-dev-tools shellcheck
 
-      # qmlformat rather than qmllint, which was the obvious choice and the
-      # wrong one. qmllint resolves types, and every Quickshell and `qs.*` type
-      # this plugin uses lives in Omarchy's shell, which is not installed on a
-      # runner and never will be — so it reported unqualified access and
-      # missing properties on Process and Timer, and exited non-zero for
-      # reasons that said nothing about the code. It passes locally only
-      # because Quickshell happens to be installed there, which makes it a
-      # check that answers a different question on every machine.
-      #
-      # qmlformat parses the grammar and resolves nothing, so it gives the same
-      # answer everywhere: does this file still parse. It says so only through
-      # its exit code — a file that fails to parse produces no output at all.
-      - name: Panel.qml and Service.qml parse
-        run: |
-          export PATH=/usr/lib/qt6/bin:$PATH
-          status=0
-          for f in Panel.qml Service.qml; do
-            if qmlformat "$f" >/dev/null; then
-              echo "$f parses"
-            else
-              echo "::error file=$f::$f is not valid QML — qmlformat could not parse it"
-              status=1
-            fi
-          done
-          exit $status
-
       # The checks that only break when one file disagrees with another: a call
       # to a Model function that was renamed, a panel binding to a service
       # property that is gone, a path reaching a shell unquoted, a scripting

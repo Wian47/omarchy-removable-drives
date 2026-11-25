@@ -110,11 +110,12 @@ const qmlformat = ["qmlformat", "/usr/lib/qt6/bin/qmlformat"].find(candidate => 
   }
 })
 
-// qmlformat, for the reason the CI workflow gives at length: qmllint resolves
-// types, every Quickshell and `qs.*` type here lives in Omarchy's shell, and a
-// check that passes only on a machine with the shell installed answers a
-// different question everywhere else. qmlformat resolves nothing and parses
-// the grammar, so it gives one answer. It reports through its exit code.
+// qmlformat rather than qmllint, which was the obvious choice and the wrong one.
+// qmllint resolves types, and every Quickshell and `qs.*` type here lives in
+// Omarchy's shell, which no CI runner has. A check that passes only on a machine
+// with the shell installed answers a different question everywhere else.
+// qmlformat resolves nothing and parses the grammar, so it gives one answer. It
+// reports through its exit code, and says nothing about a file it cannot parse.
 check("Panel.qml and Service.qml parse", () => {
   if (!qmlformat) return ["qmlformat not found, install the Qt QML tools to run this check"]
   return ["Panel.qml", "Service.qml"].filter(file => {
