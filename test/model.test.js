@@ -875,6 +875,16 @@ test("explains an iPhone that Linux cannot reach yet", () => {
   assert.strictEqual(hint.packages, "usbmuxd gvfs-afc gvfs-gphoto2")
 })
 
+test("does not mistake the rest of what Apple makes for an iPhone", () => {
+  // Captured from a MacBook.
+  const macbook = ["backend mtp", "usb 05ac,03 IR Receiver", "usb 05ac,08 iPod",
+    "usb 05ac,ff,e0,ff,fe Bluetooth USB Host Controller",
+    "usb 05ac,03,03,03 Apple Internal Keyboard / Trackpad",
+    "usb 05ac,0e,0e,ff FaceTime HD Camera (Built-in)"].join("\n")
+  assert.strictEqual(api.supportHint(api.parseSupport(macbook)), null)
+  assert.ok(api.supportHint(api.parseSupport(macbook + "\nusb 05ac,06,ff,ff iPhone")).text.includes("iPhone"))
+})
+
 test("stops explaining once the backend is installed", () => {
   const probe = PROBE_NO_AFC + "\nbackend afc\nusb 05ac,06,ff,ff iPhone"
   assert.strictEqual(api.supportHint(api.parseSupport(probe)), null)

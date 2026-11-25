@@ -1235,7 +1235,10 @@ function supportHint(support) {
 
   for (var i = 0; i < devices.length; i++) {
     var device = devices[i]
-    if (device.vendor === APPLE_VENDOR && !backends.afc) {
+    var imaging = device.classes.indexOf(IMAGING_CLASS) !== -1
+    // Every iPhone and iPad exposes an imaging interface. Apple's keyboards,
+    // receivers and hubs do not, and there is nothing on them to browse.
+    if (device.vendor === APPLE_VENDOR && imaging && !backends.afc) {
       var apple = describePackages("usbmuxd gvfs-afc gvfs-gphoto2")
       return {
         text: (device.name !== "" ? device.name : "An Apple device") +
@@ -1250,7 +1253,7 @@ function supportHint(support) {
         reconnect: true
       }
     }
-    if (device.classes.indexOf(IMAGING_CLASS) !== -1 && !backends.gphoto2 && !backends.mtp) {
+    if (imaging && !backends.gphoto2 && !backends.mtp) {
       var camera = describePackages("gvfs-gphoto2")
       return {
         text: (device.name !== "" ? device.name : "A camera") + " is connected, but no gvfs backend can read it",
